@@ -68,7 +68,7 @@ serial_test = "4.0"
 tokio = { workspace = true, features = ["test-util"] }
 
 [features]
-default = ["io-uring", "rcu-crossbeam-epoch"]
+default = ["io-uring", "rcu-crossbeam-epoch", "capnp-ancillary"]
 ci = []
 enable-security-testing = []
 rcu-aarc = ["rcu/rcu-aarc", "zpr/rcu-aarc"]

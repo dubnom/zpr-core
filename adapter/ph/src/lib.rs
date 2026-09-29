@@ -40,8 +40,6 @@ pub mod peer_table;
 pub mod pki;
 pub mod prelude;
 pub mod sample_ring;
-#[cfg(not(feature = "capnp-ancillary"))]
-pub mod set_capture_file_worker;
 pub mod signal_worker;
 pub mod special_peers;
 pub mod sys;

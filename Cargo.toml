@@ -33,6 +33,11 @@ zpr-utils = { git = "https://github.com/org-zpr/zpr-utils.git", tag = "zpr-utils
 [profile.release]
 panic = "abort"
 
+# The emilazy fork adds ancillary-data (FD passing) support to Cap'n Proto
+# streams. All uses of its extra API are gated behind the `capnp-ancillary`
+# feature (enabled by default on Unix builds of ph and ph-cli). Building with
+# `--no-default-features` uses no patched-only API, so this patch block can be
+# removed for a mainline-capnp build; such builds do not expose packet capture.
 [patch.crates-io]
 capnp = { git = "https://github.com/emilazy/capnproto-rust.git", rev = "cfbcb9b" }
 capnp-futures = { git = "https://github.com/emilazy/capnproto-rust.git", rev = "cfbcb9b" }

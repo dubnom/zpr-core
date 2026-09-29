@@ -25,7 +25,7 @@ rustyline = { version = "17.0.2", features = ["derive"] }
 dirs = "6.0.0"
 
 [features]
-default = ["pcap"]
+default = ["pcap", "capnp-ancillary"]
 pcap = ["dep:pcap", "cbpf-rs/pcap"]
 complete = ["clap_complete"]
 capnp-ancillary = ["dep:capnp-futures", "capnp-futures/tokio-unix-fd-stream"]

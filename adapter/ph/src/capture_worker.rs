@@ -21,6 +21,9 @@ impl CaptureWorker {
         }
     }
 
+    /// Without the `capnp-ancillary` feature there is no way to receive a
+    /// capture-file FD, so this (and the PCAP writer it drags in) is unused.
+    #[cfg_attr(not(feature = "capnp-ancillary"), allow(dead_code))]
     pub async fn open_capture_file(&self, file: File) -> Result<(), io::Error> {
         let mut inner = self.inner.lock().await;
         let mut savefile = PcapWriter::open(file, linktype::USER0).await?;
