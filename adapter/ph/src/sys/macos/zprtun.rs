@@ -48,6 +48,7 @@ impl ZprTun {
             // TODO: Temporary
         })?;
         let mut bldr = tun::Tun::builder(addr.into());
+        bldr.with_address(addr);
         if let Some(name) = ifname {
             bldr.with_tun_name(&name);
         }
