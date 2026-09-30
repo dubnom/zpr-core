@@ -160,6 +160,9 @@ pub struct Config {
     /// Required for adapter - the node dock address on substrate.
     pub node_addr: Option<SocketAddr>,
 
+    /// Optional local DNS stub configuration for adapters.
+    pub dns_proxy: Option<DnsProxyConfig>,
+
     /// Required for node, optional for adapter - the ZPR address (no port) of the adapter.
     pub zpr_addr: Vec<IpAddr>,
 
@@ -461,6 +464,32 @@ impl Config {
             self.node_addr = Some(*node_addr);
         }
 
+        match (config.dns_proxy_listen, config.dns_proxy_server) {
+            (Some(listen), Some(server)) => {
+                if !listen.ip().is_loopback() || listen.port() == 0 {
+                    return Err(ArgsError::ParseError(
+                        "adapter.dns_proxy_listen must be a loopback IP address with a nonzero port".into(),
+                    ));
+                }
+                if server.ip().is_unspecified()
+                    || server.ip().is_loopback()
+                    || server.ip().is_multicast()
+                    || server.port() == 0
+                {
+                    return Err(ArgsError::ParseError(
+                        "adapter.dns_proxy_server must be a concrete non-loopback IP address with a nonzero port".into(),
+                    ));
+                }
+                self.dns_proxy = Some(DnsProxyConfig { listen, server });
+            }
+            (None, None) => {}
+            _ => {
+                return Err(ArgsError::ParseError(
+                    "adapter.dns_proxy_listen and adapter.dns_proxy_server must be configured together".into(),
+                ));
+            }
+        }
+
         if let Some(bootstrap_key_file) = &config.bootstrap_key {
             if bootstrap_key_file.is_relative() {
                 self.bootstrap_key_path = Some(base_dir.join(bootstrap_key_file));
@@ -623,6 +652,7 @@ impl Default for Config {
             tun_if: None,
             logging: Vec::new(),
             node_addr: None,
+            dns_proxy: None,
             zpr_addr: Vec::new(),
             bootstrap: None,
             rsaoauth: None,
@@ -691,6 +721,14 @@ pub struct AdapterConfigSection {
     pub name: Option<String>,
     pub node_addr: Option<SocketAddr>,
     pub bootstrap_key: Option<PathBuf>,
+    pub dns_proxy_listen: Option<SocketAddr>,
+    pub dns_proxy_server: Option<SocketAddr>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DnsProxyConfig {
+    pub listen: SocketAddr,
+    pub server: SocketAddr,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -806,8 +844,67 @@ mod test {
         let toml_str = r#"
             node_addr = "10.0.0.1:5000"
             bootstrap_key = "rsa_key.pem"
+            dns_proxy_listen = "127.0.0.1:5353"
+            dns_proxy_server = "[fd00:1::53]:53"
             "#;
-        let _config: AdapterConfigSection = toml::from_str(toml_str).unwrap();
+        let config: AdapterConfigSection = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.dns_proxy_listen,
+            Some("127.0.0.1:5353".parse().unwrap())
+        );
+        assert_eq!(
+            config.dns_proxy_server,
+            Some("[fd00:1::53]:53".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_dns_proxy_config_requires_loopback_and_complete_addresses() {
+        let mut config = Config::default();
+        assert!(
+            config
+                .set_from_adapter(
+                    &AdapterConfigSection {
+                        name: None,
+                        node_addr: None,
+                        bootstrap_key: None,
+                        dns_proxy_listen: Some("0.0.0.0:5353".parse().unwrap()),
+                        dns_proxy_server: Some("[fd00:1::53]:53".parse().unwrap()),
+                    },
+                    Path::new(".")
+                )
+                .is_err()
+        );
+
+        assert!(
+            config
+                .set_from_adapter(
+                    &AdapterConfigSection {
+                        name: None,
+                        node_addr: None,
+                        bootstrap_key: None,
+                        dns_proxy_listen: Some("127.0.0.1:5353".parse().unwrap()),
+                        dns_proxy_server: Some("127.0.0.1:53".parse().unwrap()),
+                    },
+                    Path::new(".")
+                )
+                .is_err()
+        );
+
+        assert!(
+            config
+                .set_from_adapter(
+                    &AdapterConfigSection {
+                        name: None,
+                        node_addr: None,
+                        bootstrap_key: None,
+                        dns_proxy_listen: Some("127.0.0.1:5353".parse().unwrap()),
+                        dns_proxy_server: None,
+                    },
+                    Path::new(".")
+                )
+                .is_err()
+        );
     }
 
     #[test]

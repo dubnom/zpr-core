@@ -92,3 +92,16 @@ private_key_file = "tests/private_key.pem"
     #              to.
     # ------------------------------------------------------------------------
 node_addr = "192.168.0.2:5000"
+
+    # ------------------------------------------------------------------------
+    # DNS stub (optional)
+    #
+    # Listen on loopback for local applications. Configure the host resolver
+    # separately to use this address. The ZPR DNS endpoint is a bootstrap IP
+    # literal; upstream sockets are bound to this adapter's TUN. All queries
+    # use TCP and only this server; there is no fallback resolver.
+    # Use port 53 for ordinary system resolvers, or a high port for clients
+    # that can select a DNS port (for example, `dig -p`).
+    # ------------------------------------------------------------------------
+# dns_proxy_listen = "127.0.0.1:53"
+# dns_proxy_server = "[fd00:1:1::53]:53"

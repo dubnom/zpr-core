@@ -27,6 +27,7 @@ mod compress;
 mod config;
 mod counters;
 mod defs;
+mod dns_proxy;
 mod fastpath;
 mod fastpath_io;
 mod fastpath_worker;
@@ -332,6 +333,7 @@ fn main() -> ExitCode {
             panic!("unable to create TUN device: {err}");
         }
     };
+    let tun_interface_name = tun_devs[0].name().to_owned();
     let tun_ctl = Box::new(tun_ctl::TunCtlImpl::new(tun_devs[0].clone()));
 
     // Node must be set ON (adapter will be turned on as part of finishing hello)
@@ -672,6 +674,12 @@ fn main() -> ExitCode {
     //
 
     let mut js = JoinSet::new();
+
+    if ph_mode == PhMode::Adapter {
+        if let Some(dns_proxy) = asm.config.get().dns_proxy {
+            js.spawn_local(dns_proxy::launch(dns_proxy, tun_interface_name));
+        }
+    }
 
     js.spawn_local(signal_worker::launch(asm.clone()));
     js.spawn_local(mgmt_dispatch_worker::launch(asm.clone(), md_outq, mhd_outq));

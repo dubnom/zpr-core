@@ -36,6 +36,10 @@ impl From<Tun> for ZprTun {
 }
 
 impl ZprTun {
+    pub fn name(&self) -> &str {
+        &self.ifname
+    }
+
     /// Create a new TUN device.
     /// If `ifname` is `None`, the kernel will automatically assign a name.
     /// For optional `address`, only IPv4 is supported currently.

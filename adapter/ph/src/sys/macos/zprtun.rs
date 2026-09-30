@@ -23,6 +23,10 @@ impl From<tun::TunError> for ZprTunError {
 }
 
 impl ZprTun {
+    pub fn name(&self) -> &str {
+        self.inner.get_name()
+    }
+
     fn new(inner: tun::Tun) -> Self {
         ZprTun {
             inner,
