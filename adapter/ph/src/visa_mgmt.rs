@@ -131,6 +131,18 @@ pub fn build_connect_request(
         });
     }
 
+    for service_name in std::env::var("ZPR_ADAPTER_SERVICES")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|service_name| !service_name.is_empty())
+    {
+        request_claims.push(vsapi_types::Claim {
+            key: "zpr.services".into(),
+            value: service_name.to_string(),
+        });
+    }
+
     //stuff key into a vsapi_types::PublicKey so it can be sent in the connect request
     let a2a_dh_public_key = a2a_dh_public_key
         .map(|key| vsapi_types::PublicKey::new(key.as_bytes()))
