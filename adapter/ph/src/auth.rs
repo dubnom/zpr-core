@@ -446,18 +446,21 @@ impl OAuthRsa {
     pub async fn authenticate(
         &self,
         service_addr: SocketAddr,
+        local_addr: std::net::IpAddr,
         tls_cert: X509Certificate,
     ) -> Result<ZdpAuthCodeBlob, AuthError> {
         let der = pki::to_der(&tls_cert)
             .map_err(|e| AuthError::FormatError(format!("cannot encode TLS certificate: {e}")))?;
         let tls_cert = Certificate::from_der(&der).unwrap();
 
-        let nonce_buf = self.preauthorize(service_addr, &tls_cert).await?;
+        let nonce_buf = self
+            .preauthorize(service_addr, local_addr, &tls_cert)
+            .await?;
 
         let signature = sign_rsa_key(&self.private_key, &nonce_buf);
 
         let auth_code = self
-            .authorize(service_addr, &tls_cert, &nonce_buf, &signature)
+            .authorize(service_addr, local_addr, &tls_cert, &nonce_buf, &signature)
             .await?;
 
         Ok(ZdpAuthCodeBlob {
@@ -474,10 +477,12 @@ impl OAuthRsa {
     async fn preauthorize(
         &self,
         service_addr: SocketAddr,
+        local_addr: std::net::IpAddr,
         tls_cert: &Certificate,
     ) -> Result<Vec<u8>, AuthError> {
         // See https://github.com/org-zpr/zpr-core/issues/861
         let cb = reqwest::ClientBuilder::new()
+            .local_address(local_addr)
             .add_root_certificate(tls_cert.clone())
             .danger_accept_invalid_certs(true) // TODO: Figure this TLS stuff out and get rid of this
             .timeout(std::time::Duration::from_secs(10));
@@ -503,6 +508,7 @@ impl OAuthRsa {
     async fn authorize(
         &self,
         service_addr: SocketAddr,
+        local_addr: std::net::IpAddr,
         tls_cert: &Certificate,
         nonce: &[u8],
         payload: &[u8],
@@ -515,6 +521,7 @@ impl OAuthRsa {
 
         // Note client set to NOT follow redirects since that is how we get our response.
         let cb = reqwest::ClientBuilder::new()
+            .local_address(local_addr)
             .add_root_certificate(tls_cert.clone())
             .danger_accept_invalid_certs(true) // TODO: Figure this TLS stuff out and get rid of this
             .redirect(Policy::none())

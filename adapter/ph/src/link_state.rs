@@ -1193,13 +1193,11 @@ impl LinkStateWrapper {
                     // TODO: We get the ZPR address of the auth services (ASA) from our node. What about the cert?
                     //
                     // TODO: deal with the potential i/o blocking here ( https://github.com/org-zpr/zpr-core/issues/938 )
-                    match asm
-                        .tun_ctl
-                        .add_address(aaa_addr.unwrap().into(), ZPRNET_PREFIX_LEN)
-                    {
+                    let aaa_addr: IpAddr = aaa_addr.unwrap().into();
+                    match asm.tun_ctl.add_address(aaa_addr, ZPRNET_PREFIX_LEN) {
                         Ok(_) => {
                             asm.tun_ctl.set_carrier(true).unwrap();
-                            self.do_https_authenticate(asm, asa_addrs.unwrap());
+                            self.do_https_authenticate(asm, asa_addrs.unwrap(), aaa_addr);
                         }
                         Err(e) => {
                             error!(target: LINK_STATE, "{} failed to configure TUN with AAA address: {e}", asm.formatted_link_id(link_id));
@@ -1354,7 +1352,12 @@ impl LinkStateWrapper {
     ///
     /// TODO: Figure out what it means if there are multiple ASA addresses.
     /// For now this uses the first address in the list.
-    fn do_https_authenticate(&self, asm: &Arc<Assembly>, asa_addrs: Vec<SocketAddr>) {
+    fn do_https_authenticate(
+        &self,
+        asm: &Arc<Assembly>,
+        asa_addrs: Vec<SocketAddr>,
+        aaa_addr: IpAddr,
+    ) {
         let link_id = self.id;
 
         if asa_addrs.is_empty() {
@@ -1381,7 +1384,7 @@ impl LinkStateWrapper {
                 }
                 return;
             };
-            let event = match rsauth.authenticate(service_addr, tls_cert).await {
+            let event = match rsauth.authenticate(service_addr, aaa_addr, tls_cert).await {
                 Ok(blob) => LinkEvent::AuthenticationSuccess(blob),
                 Err(e) => {
                     error!(target: LINK_STATE, "{}: failed to authenticate with auth service: {e:?}", task_asm.formatted_link_id(link_id));
