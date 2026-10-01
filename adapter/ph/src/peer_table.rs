@@ -26,6 +26,7 @@ use tokio::task;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use zpr::packet_info::{ForwardingEntry, LINK_ID_UNKNOWN, LinkId, SubstrateAddr};
+use zpr::vsapi_types::Visa;
 use zpr_utils::net_defs::{ScopedIpAddr, ScopedIpv6Addr};
 
 const PEER_TABLE_SIZE: usize = config::MAX_ACTIVE_LINKS;
@@ -33,6 +34,9 @@ const PEER_TABLE_SIZE: usize = config::MAX_ACTIVE_LINKS;
 pub struct PeerState {
     pub substrate_addr: SubstrateAddr,
     pub interface_addr: ScopedIpAddr,
+    pub peer_zpr_addr: Option<std::net::IpAddr>,
+    pub expected_peer_noise_key: Option<[u8; crate::pki::NOISE_KEY_LEN]>,
+    pub bootstrap_visas: Mutex<Vec<Visa>>,
     pub link_state_machine: LinkStateWrapper,
     pub pft: PeerForwardingTable,
     pub node_state: mgmt::node::NodePeerState,
@@ -109,6 +113,9 @@ impl PeerState {
         Self {
             substrate_addr,
             interface_addr,
+            peer_zpr_addr: None,
+            expected_peer_noise_key: None,
+            bootstrap_visas: Mutex::new(Vec::new()),
             link_state_machine: LinkStateWrapper::new(link_id.get(), link_type),
             pft: PeerForwardingTable::new(),
             node_state: mgmt::node::NodePeerState::new(),
@@ -183,6 +190,7 @@ pub struct PeerTable {
     peer_slab: Mutex<RcuCslab<PeerState>>,
     peer_slab_reader: RcuBox<RcuCslabReader<PeerState>>,
     sa_to_link: DashMap<(SubstrateAddr, ScopedIpAddr), NonZero<LinkId>>,
+    node_sa_to_link: DashMap<SubstrateAddr, NonZero<LinkId>>,
     // TODO: it would be nice if this lived in the same RCU as peer_slab_reader
     special_peers: RcuBox<EnumMap<SpecialPeerName, LinkId>>,
 }
@@ -210,6 +218,7 @@ impl PeerTable {
             peer_slab: Mutex::new(peer_slab),
             peer_slab_reader,
             sa_to_link: DashMap::with_capacity(PEER_TABLE_SIZE),
+            node_sa_to_link: DashMap::with_capacity(PEER_TABLE_SIZE),
             special_peers: RcuBox::default(),
         }
     }
@@ -263,6 +272,7 @@ impl PeerTable {
         Ok(VacantPeerTableEntry {
             peer_slab_guard,
             sa_to_link_ref: &self.sa_to_link,
+            node_sa_to_link_ref: &self.node_sa_to_link,
         })
     }
 
@@ -273,6 +283,9 @@ impl PeerTable {
         };
         self.sa_to_link
             .remove(&(peer_state.substrate_addr, peer_state.interface_addr));
+        if peer_state.link_state_machine.get_link_type() == LinkType::NodeToNode {
+            self.node_sa_to_link.remove(&peer_state.substrate_addr);
+        }
 
         self.special_peers
             .update(|sp_ref| {
@@ -311,13 +324,20 @@ impl PeerTable {
         let id = self
             .sa_to_link
             .get(&(*substrate_addr, *interface_addr))
-            .map(|id| *id);
+            .map(|id| *id)
+            .or_else(|| self.node_sa_to_link.get(substrate_addr).map(|id| *id));
 
         // synchronizes with the Release in VacantPeerTableEntry::insert();
         // ensures anyone who reads from the slab following this sees the peer
         // (assuming of course it hasn't been removed!)
         atomic::fence(Ordering::Acquire);
 
+        id
+    }
+
+    pub fn lookup_node_peer(&self, substrate_addr: &SubstrateAddr) -> Option<NonZero<LinkId>> {
+        let id = self.node_sa_to_link.get(substrate_addr).map(|id| *id);
+        atomic::fence(Ordering::Acquire);
         id
     }
 
@@ -487,6 +507,7 @@ impl PeerTable {
 pub struct VacantPeerTableEntry<'a> {
     peer_slab_guard: MutexGuard<'a, RcuCslab<PeerState>>,
     sa_to_link_ref: &'a DashMap<(SubstrateAddr, ScopedIpAddr), NonZero<LinkId>>,
+    node_sa_to_link_ref: &'a DashMap<SubstrateAddr, NonZero<LinkId>>,
 }
 
 impl VacantPeerTableEntry<'_> {
@@ -515,6 +536,17 @@ impl VacantPeerTableEntry<'_> {
                     peer_state_ref.substrate_addr, peer_state_ref.interface_addr,
                 );
             }
+            if peer_state_ref.link_state_machine.get_link_type() == LinkType::NodeToNode {
+                if let Some(other) = self
+                    .node_sa_to_link_ref
+                    .insert(peer_state_ref.substrate_addr, link_id)
+                {
+                    panic!(
+                        "duplicate node peer substrate address: {link_id} and {other} share {}",
+                        peer_state_ref.substrate_addr,
+                    );
+                }
+            }
         }
 
         link_id
@@ -540,6 +572,9 @@ pub mod test {
         PeerState {
             substrate_addr,
             interface_addr,
+            peer_zpr_addr: None,
+            expected_peer_noise_key: None,
+            bootstrap_visas: Mutex::new(Vec::new()),
             link_state_machine: LinkStateWrapper::new(link_id.get(), link_type),
             pft: PeerForwardingTable::new(),
             node_state: mgmt::node::NodePeerState::new(),
@@ -555,5 +590,30 @@ pub mod test {
             txn_mgr: Arc::new(txn_mgr::TxnMgr::new()),
             km_state: PeerKmState::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn node_peer_lookup_ignores_local_interface_address() {
+        let table = PeerTable::new();
+        let peer_addr: SubstrateAddr = "192.0.2.10:5000".parse().unwrap();
+        let configured_interface =
+            ScopedIpAddr::from("192.0.2.1".parse::<std::net::IpAddr>().unwrap());
+        let received_interface =
+            ScopedIpAddr::from("192.0.2.2".parse::<std::net::IpAddr>().unwrap());
+
+        let entry = table.vacant_entry().unwrap();
+        let link_id = entry.key();
+        let peer = create_dummy_peer_state(
+            link_id,
+            LinkType::NodeToNode,
+            peer_addr,
+            configured_interface,
+        );
+        entry.insert(peer);
+
+        assert_eq!(
+            table.lookup_peer(&peer_addr, &received_interface),
+            Some(link_id)
+        );
     }
 }

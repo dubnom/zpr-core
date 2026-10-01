@@ -236,6 +236,26 @@ pub fn add_node_link(
     add_noise_link(asm, link_id, noise)
 }
 
+/// Create key management for a configured node-to-node link.
+pub fn add_node_to_node_link(
+    asm: &Assembly,
+    link_id: LinkId,
+    initiator: bool,
+    local_noise_key: NoiseKeypair,
+    expected_peer_noise_key: [u8; crate::pki::NOISE_KEY_LEN],
+    certx: KmCertExchange,
+) -> Result<(), KmSetupError> {
+    let noise = KmNoise::new(
+        initiator,
+        true,
+        Some(local_noise_key),
+        ZPIPair::new(ZPI_ENCRYPTED_HEADER_FLAG | 5, 6),
+        certx.with_expected_peer_noise_key(expected_peer_noise_key),
+    )
+    .map_err(KmSetupError::InitializationError)?;
+    add_noise_link(asm, link_id, noise)
+}
+
 /// Remove all state for this link, invalidating the SA and stopping the Key Manager.
 pub async fn drop_link(asm: &Arc<Assembly>, link_id: LinkId) {
     // If present in state, turn off the SA.

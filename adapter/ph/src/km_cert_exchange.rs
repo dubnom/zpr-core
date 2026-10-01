@@ -26,7 +26,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use crate::km::PeerCertificate;
 use crate::logging::targets::KEY_MGMT;
-use crate::pki::{self, ParseError};
+use crate::pki::{self, NOISE_KEY_LEN, ParseError};
 
 #[derive(Debug)]
 pub enum CertExchangeError {
@@ -36,6 +36,7 @@ pub enum CertExchangeError {
     ShortPayloadError,
     BufferSizeError,
     KeyMismatchError,
+    MissingPeerCertificate,
 }
 
 #[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Unaligned)]
@@ -54,6 +55,7 @@ struct CertExchgHdr {
 pub struct KmCertExchange {
     local_cert: Option<Certificate>,
     authority_cert: Option<Certificate>,
+    expected_peer_noise_key: Option<[u8; NOISE_KEY_LEN]>,
 }
 
 impl KmCertExchange {
@@ -63,7 +65,17 @@ impl KmCertExchange {
         KmCertExchange {
             local_cert: cert,
             authority_cert,
+            expected_peer_noise_key: None,
         }
+    }
+
+    /// Require the remote Noise static key and its certificate to match this pin.
+    pub fn with_expected_peer_noise_key(
+        mut self,
+        expected_peer_noise_key: [u8; NOISE_KEY_LEN],
+    ) -> Self {
+        self.expected_peer_noise_key = Some(expected_peer_noise_key);
+        self
     }
 
     /// Like [KmCertExchange::new] but takes the contents of the various PEM files.
@@ -136,9 +148,18 @@ impl KmCertExchange {
         // Now we have the cert length, so check again.
         let cert_len: usize = msg.cert_len.into();
         if cert_len == 0 {
+            if self.expected_peer_noise_key.is_some() {
+                return Err(CertExchangeError::MissingPeerCertificate);
+            }
             // The peer sent no certificate. The Noise handshake has already
             // authenticated its static key; there is simply no name bound to it.
             return Ok(None);
+        }
+        if self
+            .expected_peer_noise_key
+            .is_some_and(|expected| expected.as_slice() != expected_peer_public_key)
+        {
+            return Err(CertExchangeError::KeyMismatchError);
         }
         if payload.len() < std::mem::size_of::<CertExchgHdr>() + cert_len {
             return Err(CertExchangeError::ShortPayloadError);
@@ -267,6 +288,68 @@ mod test {
             }
             Err(e) => panic!("unexpected error: {:?}", e),
         };
+    }
+
+    #[test]
+    fn test_km_cert_matches_configured_peer_key() {
+        let adapter_exchanger =
+            KmCertExchange::new_from_pem(ADAPTER_CERT_DATA, CA_CERT_DATA).unwrap();
+        let mut buffer = BytesMut::with_capacity(MSG_BUF_SIZE);
+        adapter_exchanger.write_payload(&mut buffer).unwrap();
+
+        let adapter_private: [u8; NOISE_KEY_LEN] = BASE64_STANDARD
+            .decode(ADAPTER_NOISE_KEY)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let adapter_public = derive_public_key(&adapter_private);
+        let node_exchanger = KmCertExchange::new_from_pem(NODE_CERT_DATA, CA_CERT_DATA)
+            .unwrap()
+            .with_expected_peer_noise_key(adapter_public);
+
+        assert!(
+            node_exchanger
+                .process_payload(&buffer, &adapter_public)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_km_cert_rejects_unpinned_peer_key() {
+        let adapter_exchanger =
+            KmCertExchange::new_from_pem(ADAPTER_CERT_DATA, CA_CERT_DATA).unwrap();
+        let mut buffer = BytesMut::with_capacity(MSG_BUF_SIZE);
+        adapter_exchanger.write_payload(&mut buffer).unwrap();
+
+        let adapter_private: [u8; NOISE_KEY_LEN] = BASE64_STANDARD
+            .decode(ADAPTER_NOISE_KEY)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let adapter_public = derive_public_key(&adapter_private);
+        let node_exchanger = KmCertExchange::new_from_pem(NODE_CERT_DATA, CA_CERT_DATA)
+            .unwrap()
+            .with_expected_peer_noise_key([7; NOISE_KEY_LEN]);
+
+        assert!(matches!(
+            node_exchanger.process_payload(&buffer, &adapter_public),
+            Err(CertExchangeError::KeyMismatchError)
+        ));
+    }
+
+    #[test]
+    fn test_km_cert_requires_certificate_when_peer_key_is_pinned() {
+        let adapter_exchanger = KmCertExchange::new(None, None);
+        let mut buffer = BytesMut::with_capacity(MSG_BUF_SIZE);
+        adapter_exchanger.write_payload(&mut buffer).unwrap();
+
+        let node_exchanger =
+            KmCertExchange::new(None, None).with_expected_peer_noise_key([7; NOISE_KEY_LEN]);
+
+        assert!(matches!(
+            node_exchanger.process_payload(&buffer, &[7; NOISE_KEY_LEN]),
+            Err(CertExchangeError::MissingPeerCertificate)
+        ));
     }
 
     #[test]

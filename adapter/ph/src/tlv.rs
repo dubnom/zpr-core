@@ -446,6 +446,37 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]
+    fn test_bootstrap_visa_tlv_round_trip() {
+        let visa = zpr::vsapi_types::Visa {
+            issuer_id: 42,
+            config: 0,
+            expires: std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000),
+            visa_type: zpr::vsapi_types::VisaType::Full,
+            dock_pep: Some(zpr::vsapi_types::DockPep {
+                source_addr: "fd5a:5052::2".parse().unwrap(),
+                dest_addr: "fd5a:5052::1".parse().unwrap(),
+                session_key: Default::default(),
+                pep: zpr::vsapi_types::DockPepType::TCP(zpr::vsapi_types::TcpUdpPep::new(
+                    12_345,
+                    8_183,
+                    zpr::vsapi_types::EndpointT::Client,
+                )),
+            }),
+            fwd_pep: None,
+            cons: None,
+        };
+        let mut buf = BytesMut::new();
+        TlvEncoding::new_bootstrap_visa(visa.clone()).put(&mut buf);
+
+        let mut reader = buf.as_ref();
+        let decoded = parse_from_buf(&mut reader).unwrap();
+        let [TlvValue::Visa(decoded_visa)] = decoded[&DataType::BOOTSTRAP_VISA].as_slice() else {
+            panic!("expected one bootstrap Visa TLV");
+        };
+        assert_eq!(decoded_visa, &visa);
+    }
+
+    #[test]
     fn test_put_and_parse_u16() {
         let mut buf = BytesMut::new();
         let test_value = 0x1234_u16;

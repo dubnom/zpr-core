@@ -264,6 +264,11 @@ impl Assembly {
         link_type: LinkType,
         peer_addr: &SubstrateAddr,
         interface_addr: &ScopedIpAddr,
+        node_identity: Option<(
+            std::net::IpAddr,
+            [u8; crate::pki::NOISE_KEY_LEN],
+            Vec<zpr::vsapi_types::Visa>,
+        )>,
     ) -> Result<NonZero<LinkId>, PeerInsertError> {
         let entry = self.peer_table.vacant_entry()?;
 
@@ -271,10 +276,15 @@ impl Assembly {
             link_id: entry.key(),
         };
 
-        let peer_state =
+        let mut peer_state =
             peer_table::PeerState::new(entry.key(), link_type, *peer_addr, *interface_addr, |q| {
                 mgmt_processor_worker::launch(worker_config, self.clone(), q)
             });
+        if let Some((peer_zpr_addr, expected_peer_noise_key, bootstrap_visas)) = node_identity {
+            peer_state.peer_zpr_addr = Some(peer_zpr_addr);
+            peer_state.expected_peer_noise_key = Some(expected_peer_noise_key);
+            *peer_state.bootstrap_visas.lock().unwrap() = bootstrap_visas;
+        }
 
         let link_id = entry.insert(peer_state);
 
@@ -341,7 +351,7 @@ impl Assembly {
             LinkType::NodeToAdapter | LinkType::AdapterToNode
         ));
         debug!(target: PEER_MGMT, "Starting tether with {adapter_addr} connected to {interface_addr}");
-        let peer_id = self.add_peer(link_type, adapter_addr, interface_addr)?;
+        let peer_id = self.add_peer(link_type, adapter_addr, interface_addr, None)?;
 
         let Some(peer) = self.peer_table.get(peer_id.get()) else {
             // Peer is gone already
@@ -364,6 +374,67 @@ impl Assembly {
         return Ok(peer_id);
     }
 
+    pub fn start_node_peer(
+        self: &Arc<Self>,
+        peer_addr: SubstrateAddr,
+        peer_zpr_addr: std::net::IpAddr,
+        bootstrap_visas: Vec<zpr::vsapi_types::Visa>,
+    ) -> Result<NonZero<LinkId>, PeerInsertError> {
+        let config = self.config.get();
+        let peer_noise_key = config.peer_noise_keys.get(&peer_zpr_addr).ok_or_else(|| {
+            PeerInsertError::FailedToStart(format!(
+                "no trusted Noise certificate configured for peer {peer_zpr_addr}"
+            ))
+        })?;
+        let expected_peer_noise_key: [u8; crate::pki::NOISE_KEY_LEN] =
+            peer_noise_key.as_slice().try_into().map_err(|_| {
+                PeerInsertError::FailedToStart(format!(
+                    "invalid trusted Noise key length for peer {peer_zpr_addr}"
+                ))
+            })?;
+
+        if let Some(existing_id) = self.peer_table.lookup_node_peer(&peer_addr) {
+            let matches = self.peer_table.inspect_sync(existing_id.get(), |peer| {
+                peer.peer_zpr_addr == Some(peer_zpr_addr)
+                    && peer.expected_peer_noise_key == Some(expected_peer_noise_key)
+            });
+            if matches == Some(true) {
+                if let Some(peer) = self.peer_table.get(existing_id.get()) {
+                    *peer.bootstrap_visas.lock().unwrap() = bootstrap_visas;
+                }
+                return Ok(existing_id);
+            }
+            return Err(PeerInsertError::FailedToStart(format!(
+                "substrate endpoint {peer_addr} is already assigned to another node peer"
+            )));
+        }
+
+        let interface_addr: ScopedIpAddr = config.self_addr.ip().into();
+        let peer_id = self.add_peer(
+            LinkType::NodeToNode,
+            &peer_addr,
+            &interface_addr,
+            Some((peer_zpr_addr, expected_peer_noise_key, bootstrap_visas)),
+        )?;
+        let Some(peer) = self.peer_table.get(peer_id.get()) else {
+            return Err(PeerInsertError::FailedToStart(
+                "node peer disappeared before startup".into(),
+            ));
+        };
+        if let Err(e) = peer
+            .link_state_machine
+            .process_event(self, LinkEvent::Start)
+        {
+            error!(target: PEER_MGMT, "{} failed to start node peer: {e}; resetting", self.formatted_link_id(peer_id.get()));
+            peer.link_state_machine
+                .process_event(self, LinkEvent::Error)
+                .expect("error handling must be valid after a failed node peer start");
+            return Err(PeerInsertError::FailedToStart(e.to_string()));
+        }
+
+        Ok(peer_id)
+    }
+
     /// Temporary? function to find a link based on the actor address
     pub fn find_egress_link(&self, actor_addr: IpAddress) -> Option<NonZero<LinkId>> {
         // First check the local actor addresses to see if it's a locally-destined packet
@@ -380,10 +451,14 @@ impl Assembly {
         // Check peer actor addresses to see if one of them matches
         self.peer_table
             .find(|(_id, peer)| {
-                peer.link_state_machine
-                    .get_actor_addresses()
-                    .iter()
-                    .any(|addr| *addr == actor_addr)
+                peer.peer_zpr_addr
+                    .as_ref()
+                    .is_some_and(|addr| IpAddress::new_from_std(addr) == actor_addr)
+                    || peer
+                        .link_state_machine
+                        .get_actor_addresses()
+                        .iter()
+                        .any(|addr| *addr == actor_addr)
             })
             .map(|(id, _peer)| id)
     }

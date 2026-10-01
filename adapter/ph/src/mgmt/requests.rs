@@ -50,15 +50,21 @@ pub fn send_echo_request(asm: &Assembly, link_id: LinkId) -> Sent<'_> {
 }
 
 /// send a Hello Request (RFC 6.5 § 6.3.4)
-pub fn send_hello_request(
-    asm: &Assembly,
+pub fn send_hello_request<'a>(
+    asm: &'a Assembly,
     link_id: LinkId,
-    a2a_dh_pubkey: x25519_dalek::PublicKey,
-) -> Sent<'_> {
+    a2a_dh_pubkey: Option<x25519_dalek::PublicKey>,
+    bootstrap_visas: &[zpr::vsapi_types::Visa],
+) -> Sent<'a> {
     let mut pkt = core::new_heap_packet();
     pkt.alloc_zeroed_header::<zdp::ZdpHelloRequestHeader>();
     super::helpers::put_window_size_tlv(asm, link_id, &mut pkt);
-    tlv::TlvEncoding::new_a2a_dh_pubkey(a2a_dh_pubkey).put(&mut pkt); //add public key to the packet
+    if let Some(a2a_dh_pubkey) = a2a_dh_pubkey {
+        tlv::TlvEncoding::new_a2a_dh_pubkey(a2a_dh_pubkey).put(&mut pkt);
+    }
+    for visa in bootstrap_visas {
+        tlv::TlvEncoding::new_bootstrap_visa(visa.clone()).put(&mut pkt);
+    }
     core::send_non_flow_mgmt(asm, link_id, zdp::ZdpPacketType::HelloRequest, pkt)
 }
 

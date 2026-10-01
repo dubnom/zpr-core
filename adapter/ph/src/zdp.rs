@@ -183,10 +183,10 @@ pub struct ZdpGrantZprAddressHeader {
 #[repr(u8)]
 pub enum TerminateReason {
     Other = 0,
-    Unused1 = 1,
+    BadSequenceNumber = 1,
     RequestTimedOut = 2,
     Reset = 3,
-    Shutdown = 4, // quell any restart behavior
+    Shutdown = 4,
 }
 
 /// Terminate Link or Docking Session (TODO: document)
@@ -312,3 +312,22 @@ pub const ZDP_PACKET_MAC_SIZE: usize = 8;
 const _: () = assert!(core::mem::size_of::<ZdpBaseHeader>() == 2);
 const _: () = assert!(core::mem::size_of::<ZdpMgmtHeader>() == 8);
 const _: () = assert!(core::mem::size_of::<ZdpPerFlowHeader>() == 4);
+
+#[cfg(test)]
+mod tests {
+    use super::TerminateReason;
+    use zerocopy::IntoBytes;
+
+    fn wire_code(reason: TerminateReason) -> u8 {
+        reason.as_bytes()[0]
+    }
+
+    #[test]
+    fn termination_reason_codes_match_contract() {
+        assert_eq!(wire_code(TerminateReason::Other), 0);
+        assert_eq!(wire_code(TerminateReason::BadSequenceNumber), 1);
+        assert_eq!(wire_code(TerminateReason::RequestTimedOut), 2);
+        assert_eq!(wire_code(TerminateReason::Reset), 3);
+        assert_eq!(wire_code(TerminateReason::Shutdown), 4);
+    }
+}

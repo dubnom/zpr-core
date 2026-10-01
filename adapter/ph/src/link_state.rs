@@ -172,16 +172,13 @@ pub enum LinkStateError {
     InvalidOperation(String),
     #[error("Link {0} does not exist in peer table")]
     NotFound(LinkId),
-    #[error("This operation is not supported yet")]
-    OperationNotSupportedYet,
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum LinkType {
     Internal,
     AdapterToNode,
-    #[allow(dead_code)]
-    NodeToNode, // Currently unsupported
+    NodeToNode,
     NodeToAdapter,
 }
 
@@ -238,6 +235,9 @@ pub struct LinkStateMachine {
     timeout_count: usize,
     /// Used in Helloing when a racy InitAuthRequest arrived
     stowed_init_auth: Option<InitAuthData>,
+    /// Node-to-node Hello completes only after both local and peer requests finish.
+    node_hello_request_received: bool,
+    node_hello_response_received: bool,
     /// Handle to an outstanding echo/keepalive task; used only during Active.
     /// Instant is time at which the echo was sent.
     echo_handle: Option<(Instant, tokio::task::AbortHandle)>,
@@ -257,6 +257,8 @@ impl LinkStateMachine {
             timeout_handle: None,
             timeout_count: 0,
             stowed_init_auth: None,
+            node_hello_request_received: false,
+            node_hello_response_received: false,
             echo_handle: None,
             shutting_down: false,
         }
@@ -270,6 +272,16 @@ impl LinkStateMachine {
         self.last_state_change = std::time::Instant::now();
         self.cancel_timeout();
         self.timeout_count = 0;
+    }
+
+    fn record_node_hello_request(&mut self) -> bool {
+        self.node_hello_request_received = true;
+        self.node_hello_request_received && self.node_hello_response_received
+    }
+
+    fn record_node_hello_response(&mut self) -> bool {
+        self.node_hello_response_received = true;
+        self.node_hello_request_received && self.node_hello_response_received
     }
 
     /// Schedule the given callback to be invoked asynchronously after the
@@ -511,6 +523,24 @@ impl LinkStateWrapper {
     fn process_start(&self, asm: &Assembly) -> Result<(), LinkStateError> {
         assert!(self.id != LINK_ID_UNKNOWN);
         let link_id = self.id;
+        let node_peer = if self.link_type == LinkType::NodeToNode {
+            let identity = asm
+                .peer_table
+                .inspect_sync(link_id, |peer| {
+                    peer.peer_zpr_addr.zip(peer.expected_peer_noise_key)
+                })
+                .flatten()
+                .ok_or_else(|| {
+                    LinkStateError::InvalidOperation(
+                        "node-to-node link has no configured peer identity".into(),
+                    )
+                })?;
+            let local_addr = asm.get_local_dock_addr();
+            let initiator = node_address_is_lower(local_addr, identity.0)?;
+            Some((identity.0, identity.1, initiator))
+        } else {
+            None
+        };
         let mut locked_fsm = self.locked_fsm.lock().unwrap();
         if locked_fsm.state != LinkState::Inactive {
             return Err(LinkStateError::UnexpectedTransition(
@@ -520,6 +550,8 @@ impl LinkStateWrapper {
         }
 
         locked_fsm.status = LinkStatus::Up;
+        locked_fsm.node_hello_request_received = false;
+        locked_fsm.node_hello_response_received = false;
         locked_fsm.set_state(LinkState::Keying);
 
         info!(target: LINK_STATE, "{} started.  Keying in progress", asm.formatted_link_id(link_id));
@@ -537,9 +569,32 @@ impl LinkStateWrapper {
                 Ok(())
             }
             LinkType::NodeToNode => {
-                error!(target: LINK_STATE, "Error: Node to node not supported yet");
-                locked_fsm.set_state(LinkState::Error);
-                Err(LinkStateError::OperationNotSupportedYet)
+                let (peer_zpr_addr, expected_peer_noise_key, initiator) =
+                    node_peer.expect("node peer identity checked before state transition");
+                let local_noise_key = asm.self_noise_keypair.clone().ok_or_else(|| {
+                    LinkStateError::InvalidOperation(
+                        "node-to-node link requires a local Noise key".into(),
+                    )
+                })?;
+                let certx = asm.certx.clone().ok_or_else(|| {
+                    LinkStateError::InvalidOperation(
+                        "node-to-node link requires a local Noise certificate".into(),
+                    )
+                })?;
+                info!(target: LINK_STATE, "{} starting node link to {} as {}", asm.formatted_link_id(link_id), peer_zpr_addr, if initiator { "initiator" } else { "responder" });
+                km_multiplexor::add_node_to_node_link(
+                    asm,
+                    link_id,
+                    initiator,
+                    local_noise_key,
+                    expected_peer_noise_key,
+                    certx,
+                )
+                .map_err(|e| {
+                    LinkStateError::InvalidOperation(format!(
+                        "failed to configure node-to-node keying: {e:?}"
+                    ))
+                })
             }
             LinkType::NodeToAdapter => {
                 km_multiplexor::add_node_link(
@@ -632,16 +687,29 @@ impl LinkStateWrapper {
 
         locked_fsm.set_state(LinkState::Helloing);
 
-        // IF this is an adapter, it's expected to issue the hello
-        if self.link_type == LinkType::AdapterToNode {
-            // Grab public key from keypair to send in hello request
-            let pubkey = x25519_dalek::PublicKey::from(&asm.a2a_dh_keypair);
-            mgmt::requests::send_hello_request(asm, self.id, pubkey).enqueue();
-            self.set_timeout(asm, &mut locked_fsm, config::LINK_HELLO_TIMEOUT);
-            debug!(
-                target: LINK_STATE,
-                "{} sent HelloRequest.  Waiting for other side to respond.", asm.formatted_link_id(link_id)
-            );
+        match self.link_type {
+            LinkType::AdapterToNode => {
+                let pubkey = x25519_dalek::PublicKey::from(&asm.a2a_dh_keypair);
+                mgmt::requests::send_hello_request(asm, self.id, Some(pubkey), &[]).enqueue();
+                self.set_timeout(asm, &mut locked_fsm, config::LINK_HELLO_TIMEOUT);
+                debug!(
+                    target: LINK_STATE,
+                    "{} sent HelloRequest. Waiting for other side to respond.", asm.formatted_link_id(link_id)
+                );
+            }
+            LinkType::NodeToNode => {
+                let bootstrap_visas = asm
+                    .peer_table
+                    .inspect_sync(link_id, |peer| peer.bootstrap_visas.lock().unwrap().clone())
+                    .unwrap_or_default();
+                mgmt::requests::send_hello_request(asm, self.id, None, &bootstrap_visas).enqueue();
+                self.set_timeout(asm, &mut locked_fsm, config::LINK_HELLO_TIMEOUT);
+                debug!(
+                    target: LINK_STATE,
+                    "{} sent node HelloRequest. Waiting for both Hello directions.", asm.formatted_link_id(link_id)
+                );
+            }
+            LinkType::NodeToAdapter | LinkType::Internal => {}
         }
         // Otherwise we are a node so wait for an adapter to reach out
         Ok(())
@@ -654,9 +722,15 @@ impl LinkStateWrapper {
         let mut locked_fsm = self.locked_fsm.lock().unwrap();
         let link_id = self.id;
         match (self.link_type, locked_fsm.state) {
-            (LinkType::NodeToNode, LinkState::Helloing) => {
-                locked_fsm.set_state(LinkState::Active);
-                debug!(target: LINK_STATE, "{} finished helloing.  Becoming active", asm.formatted_link_id(link_id));
+            (LinkType::NodeToNode, LinkState::Helloing | LinkState::Active) => {
+                mgmt::requests::send_hello_success_response(asm, link_id, 0, &[], None).enqueue();
+                if locked_fsm.state == LinkState::Active {
+                    return Ok(());
+                }
+                if locked_fsm.record_node_hello_request() {
+                    debug!(target: LINK_STATE, "{} completed both Hello directions", asm.formatted_link_id(link_id));
+                    return self.run_active(asm, locked_fsm);
+                }
                 Ok(())
             }
             (LinkType::NodeToAdapter, LinkState::Helloing) => {
@@ -796,8 +870,10 @@ impl LinkStateWrapper {
                 let mut link_data = self.locked_data.lock().unwrap();
                 link_data.asa_addresses = maybe_asa_addrs.clone();
                 drop(link_data);
-                locked_fsm.set_state(LinkState::Active);
-                debug!(target: LINK_STATE, "{} finished helloing.  Becoming active", asm.formatted_link_id(link_id));
+                if locked_fsm.record_node_hello_response() {
+                    debug!(target: LINK_STATE, "{} completed both Hello directions", asm.formatted_link_id(link_id));
+                    return self.run_active(asm, locked_fsm);
+                }
                 Ok(())
             }
             (LinkType::NodeToAdapter, _) => {
@@ -1825,10 +1901,12 @@ impl LinkStateWrapper {
         info!(target: LINK_STATE,
             "Received terminate for {} with reason {:?}", asm.formatted_link_id(link_id), reason
         );
-        self.locked_fsm
-            .lock()
-            .unwrap()
-            .set_state(LinkState::Closing);
+        let mut locked_fsm = self.locked_fsm.lock().unwrap();
+        if terminate_suppresses_restart(reason) {
+            locked_fsm.shutting_down = true;
+        }
+        locked_fsm.set_state(LinkState::Closing);
+        drop(locked_fsm);
         self.clean_up_link_state(asm).detach_all();
         Ok(())
     }
@@ -1880,6 +1958,38 @@ impl LinkStateWrapper {
         self.set_timeout(asm, &mut locked_fsm, config::DEFAULT_KEEP_ALIVE_TIMEOUT);
 
         Ok(())
+    }
+}
+
+fn terminate_suppresses_restart(reason: TerminateReason) -> bool {
+    matches!(reason, TerminateReason::Reset | TerminateReason::Shutdown)
+}
+
+fn node_address_is_lower(
+    local: std::net::IpAddr,
+    peer: std::net::IpAddr,
+) -> Result<bool, LinkStateError> {
+    use std::net::IpAddr;
+
+    if local.is_unspecified() || peer.is_unspecified() {
+        return Err(LinkStateError::InvalidOperation(
+            "node-to-node keying requires assigned Node Addresses".into(),
+        ));
+    }
+
+    match (local, peer) {
+        (IpAddr::V4(local), IpAddr::V4(peer)) if local != peer => {
+            Ok(u32::from(local) < u32::from(peer))
+        }
+        (IpAddr::V6(local), IpAddr::V6(peer)) if local != peer => {
+            Ok(u128::from(local) < u128::from(peer))
+        }
+        (local, peer) if local == peer => Err(LinkStateError::InvalidOperation(
+            "local and peer Node Addresses must differ".into(),
+        )),
+        _ => Err(LinkStateError::InvalidOperation(
+            "node-to-node peer Node Addresses must use the same IP family".into(),
+        )),
     }
 }
 
@@ -1965,11 +2075,42 @@ impl Display for LinkData {
 
 #[cfg(test)]
 mod tests {
-    use super::{LinkState, LinkStateMachine};
+    use super::{LinkState, LinkStateMachine, node_address_is_lower, terminate_suppresses_restart};
+    use crate::zdp::TerminateReason;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::sync::oneshot;
     use tokio::task::LocalSet;
+
+    #[test]
+    fn node_hello_requires_both_directions() {
+        let mut request_first = LinkStateMachine::new(1);
+        assert!(!request_first.record_node_hello_request());
+        assert!(request_first.record_node_hello_response());
+
+        let mut response_first = LinkStateMachine::new(2);
+        assert!(!response_first.record_node_hello_response());
+        assert!(response_first.record_node_hello_request());
+    }
+
+    #[test]
+    fn node_keying_initiator_uses_unsigned_node_address_order() {
+        let lower: std::net::IpAddr = "fd5a:5052::1".parse().unwrap();
+        let higher: std::net::IpAddr = "fd5a:5052::2".parse().unwrap();
+        assert!(node_address_is_lower(lower, higher).unwrap());
+        assert!(!node_address_is_lower(higher, lower).unwrap());
+        assert!(node_address_is_lower(lower, lower).is_err());
+    }
+
+    #[test]
+    fn reset_and_shutdown_termination_do_not_restart() {
+        assert!(terminate_suppresses_restart(TerminateReason::Reset));
+        assert!(terminate_suppresses_restart(TerminateReason::Shutdown));
+        assert!(!terminate_suppresses_restart(TerminateReason::Other));
+        assert!(!terminate_suppresses_restart(
+            TerminateReason::RequestTimedOut
+        ));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn timeout_test() {

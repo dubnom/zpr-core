@@ -13,6 +13,7 @@ use crate::peer_table::PeerType;
 use crate::prelude::*;
 use crate::tc;
 use crate::tlv;
+use crate::visa_mgmt;
 use crate::zdp;
 use std::net::SocketAddr;
 use std::num::NonZero;
@@ -44,6 +45,8 @@ pub enum HandleMgmtError {
 
     #[error("link closed")]
     LinkClosed,
+    #[error("failed to install bootstrap visa: {0}")]
+    BootstrapVisaInstallFailed(String),
 }
 
 const X25519_KEY_LEN: usize = 32;
@@ -57,6 +60,7 @@ impl From<&HandleMgmtError> for counters::ManagementCounterType {
             HandleMgmtError::UnknownTransaction => Self::UnknownTransaction,
             HandleMgmtError::LinkStateError(_) => Self::OtherError,
             HandleMgmtError::LinkClosed => Self::OtherError,
+            HandleMgmtError::BootstrapVisaInstallFailed(_) => Self::OtherError,
         }
     }
 }
@@ -218,6 +222,15 @@ pub async fn handle_hello_request(asm: &Arc<Assembly>, mut pkt: Packet) -> Handl
         }
     };
 
+    let node_peer_zpr_addr = asm
+        .peer_table
+        .inspect_sync(ingress_link_id, |peer| {
+            (peer.link_state_machine.get_link_type() == LinkType::NodeToNode)
+                .then_some(peer.peer_zpr_addr)
+        })
+        .flatten()
+        .flatten();
+
     // We just emit the TLV stuff to log but only use window size and the A2A key.
     for (tlv_type, tlv_value) in &tlv_data {
         match *tlv_type {
@@ -226,6 +239,27 @@ pub async fn handle_hello_request(asm: &Arc<Assembly>, mut pkt: Packet) -> Handl
             }
             tlv::DataType::A2A_DH_PUBKEY => {
                 process_a2a_dh_pubkey_tlv(&asm, ingress_link_id, "HelloRequest", tlv_value)?;
+            }
+            tlv::DataType::BOOTSTRAP_VISA => {
+                let Some(peer_zpr_addr) = node_peer_zpr_addr else {
+                    return Err(HandleMgmtError::MessageNotPermitted);
+                };
+                for value in tlv_value {
+                    let tlv::TlvValue::Visa(visa) = value else {
+                        return Err(HandleMgmtError::BadStructure);
+                    };
+                    let Some(dock_pep) = visa.dock_pep.as_ref() else {
+                        return Err(HandleMgmtError::BadStructure);
+                    };
+                    if visa.visa_type != zpr::vsapi_types::VisaType::Full
+                        || (dock_pep.source_addr != peer_zpr_addr
+                            && dock_pep.dest_addr != peer_zpr_addr)
+                    {
+                        return Err(HandleMgmtError::BadStructure);
+                    }
+                    visa_mgmt::insert_visa(asm, visa.clone())
+                        .map_err(|e| HandleMgmtError::BootstrapVisaInstallFailed(e.to_string()))?;
+                }
             }
             _ => {
                 info!(

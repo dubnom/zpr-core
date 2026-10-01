@@ -1,5 +1,6 @@
 //! Static system configuration.
 
+use std::collections::HashMap;
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{self, Path, PathBuf};
@@ -130,6 +131,9 @@ pub struct Config {
     /// service (the address peers dial). Needed when it differs from the bind address,
     /// e.g. behind NAT. Resolved from the config-file string at parse time.
     pub advertised_substrate_addr: Option<SocketAddr>,
+
+    /// Expected peer Noise public keys, keyed by the peer's ZPR Node Address.
+    pub peer_noise_keys: HashMap<IpAddr, Vec<u8>>,
 
     /// Path to a PEM file containing the Certificate Authority certificate.
     /// Optional and if present is used by the link management system to verify passed noise certificates.
@@ -271,7 +275,7 @@ impl Config {
             let base_dir = config_file.config_path.parent().unwrap();
             config.set_from_globals(&config_file.global, base_dir)?;
             config.set_from_authentication(&config_file.authentication, base_dir)?;
-            config.set_from_node(&config_file.node)?;
+            config.set_from_node(&config_file.node, base_dir)?;
         }
         Ok(config)
     }
@@ -527,10 +531,36 @@ impl Config {
 
     // Overwrite our internal state with the values present in the node section
     // of TOML config.
-    fn set_from_node(&mut self, config: &Option<NodeConfigSection>) -> Result<(), ArgsError> {
+    fn set_from_node(
+        &mut self,
+        config: &Option<NodeConfigSection>,
+        base_dir: &Path,
+    ) -> Result<(), ArgsError> {
         if let Some(config) = config {
             if let Some(advertised) = &config.advertised_substrate_addr {
                 self.advertised_substrate_addr = Some(resolve_advertised_addr(advertised)?);
+            }
+            if let Some(peer_certificates) = &config.peer_noise_certificates {
+                for (peer_addr, cert_path) in peer_certificates {
+                    let cert_path = if cert_path.is_relative() {
+                        base_dir.join(cert_path)
+                    } else {
+                        cert_path.clone()
+                    };
+                    let cert = load_cert(&cert_path).map_err(|e| {
+                        ArgsError::ParseError(format!(
+                            "failed to load peer Noise certificate for {peer_addr}: {e}"
+                        ))
+                    })?;
+                    let noise_key = crate::pki::public_key(&cert).subject_public_key.raw_bytes();
+                    if noise_key.len() != NOISE_KEY_LEN {
+                        return Err(ArgsError::ParseError(format!(
+                            "peer Noise certificate for {peer_addr} has a {}-byte key; expected {NOISE_KEY_LEN}",
+                            noise_key.len()
+                        )));
+                    }
+                    self.peer_noise_keys.insert(*peer_addr, noise_key.to_vec());
+                }
             }
         }
         Ok(())
@@ -648,6 +678,7 @@ impl Default for Config {
             private_key_file: None,
             private_key_data: None,
             advertised_substrate_addr: None,
+            peer_noise_keys: HashMap::new(),
             auth_private_key: None,
             tun_if: None,
             logging: Vec::new(),
@@ -698,6 +729,8 @@ pub struct NodeConfigSection {
     /// The substrate address this node advertises to the visa service, as a
     /// literal `"IP:port"` string (IPv6 in square-bracket notation).
     pub advertised_substrate_addr: Option<String>,
+    /// Peer Node Address to PEM certificate containing its expected Noise key.
+    pub peer_noise_certificates: Option<HashMap<IpAddr, PathBuf>>,
 }
 
 // Global section is shared by nodes and adapters.
@@ -930,7 +963,9 @@ mod test {
             "#;
         let file_config: NodeConfig = toml::from_str(toml_str).unwrap();
         let mut config = Config::default();
-        config.set_from_node(&file_config.node).unwrap();
+        config
+            .set_from_node(&file_config.node, std::path::Path::new("."))
+            .unwrap();
         assert_eq!(
             config.advertised_substrate_addr,
             Some("203.0.113.7:6000".parse().unwrap())
@@ -943,8 +978,60 @@ mod test {
             "#;
         let file_config: NodeConfig = toml::from_str(toml_str).unwrap();
         let mut config = Config::default();
-        config.set_from_node(&file_config.node).unwrap();
+        config
+            .set_from_node(&file_config.node, std::path::Path::new("."))
+            .unwrap();
         assert_eq!(config.advertised_substrate_addr, None);
+    }
+
+    #[test]
+    fn test_node_config_peer_noise_certificates_parse() {
+        let toml_str = r#"
+            advertised_substrate_addr = "203.0.113.7:5000"
+
+            [peer_noise_certificates]
+            "fd5a:5052::2" = "peer-two.pem"
+        "#;
+        let config: NodeConfigSection = toml::from_str(toml_str).unwrap();
+        let peer_addr: IpAddr = "fd5a:5052::2".parse().unwrap();
+        assert_eq!(
+            config.peer_noise_certificates.unwrap().get(&peer_addr),
+            Some(&PathBuf::from("peer-two.pem"))
+        );
+    }
+
+    #[test]
+    fn test_node_config_loads_peer_noise_key_relative_to_config() {
+        use crate::km_testdata::test::NODE_CERT_DATA;
+
+        let config_dir =
+            std::env::temp_dir().join(format!("zpr-peer-cert-config-{}", std::process::id()));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let cert_path = config_dir.join("peer-two.pem");
+        std::fs::write(&cert_path, NODE_CERT_DATA).unwrap();
+
+        let peer_addr: IpAddr = "fd5a:5052::2".parse().unwrap();
+        let node_config = NodeConfigSection {
+            advertised_substrate_addr: None,
+            peer_noise_certificates: Some(HashMap::from([(
+                peer_addr,
+                PathBuf::from("peer-two.pem"),
+            )])),
+        };
+        let mut config = Config::default();
+        config
+            .set_from_node(&Some(node_config), &config_dir)
+            .unwrap();
+
+        let cert = load_cert(&cert_path).unwrap();
+        let expected_key = crate::pki::public_key(&cert)
+            .subject_public_key
+            .raw_bytes()
+            .to_vec();
+        assert_eq!(config.peer_noise_keys.get(&peer_addr), Some(&expected_key));
+
+        std::fs::remove_file(cert_path).unwrap();
+        std::fs::remove_dir(config_dir).unwrap();
     }
 
     #[test]
