@@ -52,6 +52,7 @@ type VSConnectResponse = Result<(), VSApiError>;
 type VSRegisterVssResponse = Result<Vec<VisaOp>, VSApiError>;
 type VSAuthorizeConnectResponse = Result<Connection, VSApiError>;
 type VSNotifyDisconnectResponse = Result<(), VSApiError>;
+type VSLinkStatusResponse = Result<(), VSApiError>;
 type VSPingResponse = Result<(), VSApiError>;
 type VSVisaIdsResponse = Result<Vec<u64>, VSApiError>;
 type VSVisaByIdResponse = Result<Vec<Visa>, VSApiError>;
@@ -67,6 +68,14 @@ pub struct NodeConnect {
 #[derive(Debug)]
 pub struct NodeOpen {
     pub state: StateFlag,
+}
+
+#[derive(Debug, Clone)]
+pub struct NodeLinkStatusReport {
+    pub link_id: String,
+    pub peer_zpr_addr: IpAddr,
+    pub is_up: bool,
+    pub generation: u64,
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +111,8 @@ enum VS2Command {
         DisconnectNotice,
         oneshot::Sender<VSNotifyDisconnectResponse>,
     ),
+
+    ReportLinkStatus(NodeLinkStatusReport, oneshot::Sender<VSLinkStatusResponse>),
 
     Ping(oneshot::Sender<VSPingResponse>),
 
@@ -581,6 +592,22 @@ impl VSConn {
                 Ok(())
             }
 
+            VS2Command::ReportLinkStatus(req, resp_tx) => {
+                debug!(target: VS_RPC, "VSConn: report_link_status for peer {}", req.peer_zpr_addr);
+                let resp = if !cmd_state.is_connected() {
+                    Err(VSApiError::CommandFailed(
+                        "not connected to VS-API".to_string(),
+                    ))
+                } else {
+                    self.do_report_link_status(cmd_state.vs_handle.as_ref().unwrap(), req)
+                        .await
+                };
+                if let Err(e) = resp_tx.send(resp) {
+                    error!(target: VS_RPC, "failed to send report_link_status response: {:?}", e);
+                }
+                Ok(())
+            }
+
             VS2Command::Ping(resp_tx) => {
                 debug!(target: VS_RPC, "VSConn: ping");
                 let resp = if !cmd_state.is_connected() {
@@ -853,6 +880,35 @@ impl VSConn {
         }
     }
 
+    async fn do_report_link_status(
+        &self,
+        vs_h: &vsapi2::v_s_handle::Client,
+        report: NodeLinkStatusReport,
+    ) -> Result<(), VSApiError> {
+        let mut request = vs_h.report_link_status_request();
+        let mut params = request.get();
+        params.set_link_id(&report.link_id);
+        report
+            .peer_zpr_addr
+            .write_to(&mut params.reborrow().init_peer_zpr_addr());
+        params.set_is_up(report.is_up);
+        params.set_generation(report.generation);
+
+        let response = rpc_with_timeout(
+            "report_link_status",
+            DEFAULT_RPC_TIMEOUT,
+            request.send().promise,
+        )
+        .await?;
+        let ok_or_err = response.get()?.get_res()?;
+        match ok_or_err.which()? {
+            vsapi2::ok_or_error::Which::Ok(_) => Ok(()),
+            vsapi2::ok_or_error::Which::Error(err_obj) => {
+                Err(ApiResponseError::try_from(err_obj?)?.into())
+            }
+        }
+    }
+
     async fn do_register_vss(
         &self,
         vs_h: &vsapi2::v_s_handle::Client,
@@ -1026,6 +1082,13 @@ impl VSConnHandle {
         let (resp_tx, resp_rx) = oneshot::channel();
         let cmd = VS2Command::NotifyDisconnect(req, resp_tx);
         self.send_command(cmd).await?;
+        resp_rx.await.map_err(|_| VSApiError::ConnClosed)?
+    }
+
+    pub async fn report_link_status(&self, report: NodeLinkStatusReport) -> Result<(), VSApiError> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.send_command(VS2Command::ReportLinkStatus(report, resp_tx))
+            .await?;
         resp_rx.await.map_err(|_| VSApiError::ConnClosed)?
     }
 

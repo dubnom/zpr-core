@@ -104,6 +104,9 @@ pub struct Assembly {
         reload::Handle<filter::Filtered<fmt::Layer<Registry>, Targets, Registry>, Registry>,
 }
 
+static NODE_LINK_STATUS_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 impl Assembly {
     pub fn get_uptime(&self) -> std::time::Duration {
         std::time::Instant::now().duration_since(self.system_start_time)
@@ -266,6 +269,7 @@ impl Assembly {
         interface_addr: &ScopedIpAddr,
         node_identity: Option<(
             std::net::IpAddr,
+            String,
             [u8; crate::pki::NOISE_KEY_LEN],
             Vec<zpr::vsapi_types::Visa>,
         )>,
@@ -280,8 +284,11 @@ impl Assembly {
             peer_table::PeerState::new(entry.key(), link_type, *peer_addr, *interface_addr, |q| {
                 mgmt_processor_worker::launch(worker_config, self.clone(), q)
             });
-        if let Some((peer_zpr_addr, expected_peer_noise_key, bootstrap_visas)) = node_identity {
+        if let Some((peer_zpr_addr, policy_link_id, expected_peer_noise_key, bootstrap_visas)) =
+            node_identity
+        {
             peer_state.peer_zpr_addr = Some(peer_zpr_addr);
+            peer_state.policy_link_id = Some(policy_link_id);
             peer_state.expected_peer_noise_key = Some(expected_peer_noise_key);
             *peer_state.bootstrap_visas.lock().unwrap() = bootstrap_visas;
         }
@@ -296,6 +303,7 @@ impl Assembly {
     /// Caled from `LinkStateWrapper::complete_close`.`
     /// Also drops visas related to the peer.
     pub fn drop_peer(self: &Arc<Self>, link_id: LinkId) {
+        self.report_node_link_status(link_id, false);
         let vs_link_id = self
             .peer_table
             .lookup_special_peer(SpecialPeerName::VisaServiceAdapter);
@@ -378,6 +386,7 @@ impl Assembly {
         self: &Arc<Self>,
         peer_addr: SubstrateAddr,
         peer_zpr_addr: std::net::IpAddr,
+        policy_link_id: String,
         bootstrap_visas: Vec<zpr::vsapi_types::Visa>,
     ) -> Result<NonZero<LinkId>, PeerInsertError> {
         let config = self.config.get();
@@ -396,11 +405,15 @@ impl Assembly {
         if let Some(existing_id) = self.peer_table.lookup_node_peer(&peer_addr) {
             let matches = self.peer_table.inspect_sync(existing_id.get(), |peer| {
                 peer.peer_zpr_addr == Some(peer_zpr_addr)
+                    && peer.policy_link_id.as_deref() == Some(policy_link_id.as_str())
                     && peer.expected_peer_noise_key == Some(expected_peer_noise_key)
             });
             if matches == Some(true) {
                 if let Some(peer) = self.peer_table.get(existing_id.get()) {
                     *peer.bootstrap_visas.lock().unwrap() = bootstrap_visas;
+                }
+                if self.is_link_ready(existing_id.get()) {
+                    self.report_node_link_status(existing_id.get(), true);
                 }
                 return Ok(existing_id);
             }
@@ -414,7 +427,12 @@ impl Assembly {
             LinkType::NodeToNode,
             &peer_addr,
             &interface_addr,
-            Some((peer_zpr_addr, expected_peer_noise_key, bootstrap_visas)),
+            Some((
+                peer_zpr_addr,
+                policy_link_id,
+                expected_peer_noise_key,
+                bootstrap_visas,
+            )),
         )?;
         let Some(peer) = self.peer_table.get(peer_id.get()) else {
             return Err(PeerInsertError::FailedToStart(
@@ -433,6 +451,42 @@ impl Assembly {
         }
 
         Ok(peer_id)
+    }
+
+    pub fn report_node_link_status(self: &Arc<Self>, link_id: LinkId, is_up: bool) {
+        let Some(vsconn) = self.vsconn.clone() else {
+            return;
+        };
+        let epoch_millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        NODE_LINK_STATUS_GENERATION.fetch_max(epoch_millis, std::sync::atomic::Ordering::Relaxed);
+        let report = self
+            .peer_table
+            .inspect_sync(link_id, |peer| {
+                if peer.link_state_machine.get_link_type() != LinkType::NodeToNode {
+                    return None;
+                }
+                Some(libnode::vsconn::NodeLinkStatusReport {
+                    link_id: peer.policy_link_id.clone()?,
+                    peer_zpr_addr: peer.peer_zpr_addr?,
+                    is_up,
+                    generation: NODE_LINK_STATUS_GENERATION
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        .wrapping_add(1),
+                })
+            })
+            .flatten();
+        let Some(report) = report else {
+            return;
+        };
+
+        tokio::task::spawn_local(async move {
+            if let Err(e) = vsconn.report_link_status(report).await {
+                warn!(target: PEER_MGMT, "failed to report node link status to Visa Service: {e}");
+            }
+        });
     }
 
     /// Temporary? function to find a link based on the actor address

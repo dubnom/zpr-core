@@ -198,7 +198,7 @@ async fn process_topology(asm: &Arc<Assembly>, links: Vec<Link>) -> SetTopologyR
 
     for link in links {
         let peer_addr = std::net::SocketAddr::from(link.peer);
-        match asm.start_node_peer(peer_addr, link.zpr_addr, link.visas) {
+        match asm.start_node_peer(peer_addr, link.zpr_addr, link.link_id, link.visas) {
             Ok(link_id) => info!(
                 target: VSS_RPC,
                 "configured node peer {} at {peer_addr} as link {}",

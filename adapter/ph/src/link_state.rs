@@ -1809,6 +1809,9 @@ impl LinkStateWrapper {
                 return;
             }
             (LinkState::Closing, _) => {
+                if self.link_type == LinkType::NodeToNode {
+                    asm.report_node_link_status(link_id, false);
+                }
                 locked_fsm.silent = false;
                 locked_fsm.set_state(LinkState::Inactive);
                 info!(target: LINK_STATE, "{} has fully shut down", asm.formatted_link_id(link_id));
@@ -1952,6 +1955,9 @@ impl LinkStateWrapper {
         locked_fsm.set_state(LinkState::Active);
         asm.counters.management[ManagementCounterType::PeerHandshakeSuccess].increment();
         debug!(target: LINK_STATE, "{} entering active state", asm.formatted_link_id(self.id));
+        if self.link_type == LinkType::NodeToNode {
+            asm.report_node_link_status(self.id, true);
+        }
 
         // kick off our keepalive mechanism
         locked_fsm.echo_handle.take().inspect(|(_, h)| h.abort()); // should already be None (indicating no echo outstanding) but let's be sure
