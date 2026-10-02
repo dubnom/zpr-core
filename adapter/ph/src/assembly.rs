@@ -409,8 +409,30 @@ impl Assembly {
                     && peer.expected_peer_noise_key == Some(expected_peer_noise_key)
             });
             if matches == Some(true) {
-                if let Some(peer) = self.peer_table.get(existing_id.get()) {
-                    *peer.bootstrap_visas.lock().unwrap() = bootstrap_visas;
+                let bootstrap_visas_changed =
+                    if let Some(peer) = self.peer_table.get(existing_id.get()) {
+                        let mut existing_visas = peer.bootstrap_visas.lock().unwrap();
+                        if *existing_visas == bootstrap_visas {
+                            false
+                        } else {
+                            *existing_visas = bootstrap_visas.clone();
+                            true
+                        }
+                    } else {
+                        false
+                    };
+                if bootstrap_visas_changed
+                    && !bootstrap_visas.is_empty()
+                    && self.is_link_ready(existing_id.get())
+                {
+                    info!(target: PEER_MGMT, "updating bootstrap visas on active node peer {}", self.formatted_link_id(existing_id.get()));
+                    crate::mgmt::requests::send_hello_request(
+                        self,
+                        existing_id.get(),
+                        None,
+                        &bootstrap_visas,
+                    )
+                    .enqueue();
                 }
                 if self.is_link_ready(existing_id.get()) {
                     self.report_node_link_status(existing_id.get(), true);
@@ -457,13 +479,52 @@ impl Assembly {
         let Some(vsconn) = self.vsconn.clone() else {
             return;
         };
+        let Some(report) = self.node_link_status_report(link_id, is_up) else {
+            return;
+        };
+
+        tokio::task::spawn_local(async move {
+            if let Err(e) = vsconn.report_link_status(report).await {
+                warn!(target: PEER_MGMT, "failed to report node link status to Visa Service: {e}");
+            }
+        });
+    }
+
+    /// Replay active peer state after connecting to the Visa Service. Link-up may
+    /// precede VSConn availability, so the original status report can be lost.
+    pub async fn report_active_node_link_statuses(self: &Arc<Self>) {
+        let Some(vsconn) = self.vsconn.clone() else {
+            return;
+        };
+        let mut active_link_ids = Vec::new();
+        self.peer_table.for_each(|(link_id, peer)| {
+            if peer.link_state_machine.get_link_type() == LinkType::NodeToNode
+                && peer.link_state_machine.is_ready()
+            {
+                active_link_ids.push(link_id.get());
+            }
+        });
+        for link_id in active_link_ids {
+            let Some(report) = self.node_link_status_report(link_id, true) else {
+                continue;
+            };
+            if let Err(error) = vsconn.report_link_status(report).await {
+                warn!(target: PEER_MGMT, "failed to replay active node link status to Visa Service: {error}");
+            }
+        }
+    }
+
+    fn node_link_status_report(
+        &self,
+        link_id: LinkId,
+        is_up: bool,
+    ) -> Option<libnode::vsconn::NodeLinkStatusReport> {
         let epoch_millis = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
         NODE_LINK_STATUS_GENERATION.fetch_max(epoch_millis, std::sync::atomic::Ordering::Relaxed);
-        let report = self
-            .peer_table
+        self.peer_table
             .inspect_sync(link_id, |peer| {
                 if peer.link_state_machine.get_link_type() != LinkType::NodeToNode {
                     return None;
@@ -477,16 +538,7 @@ impl Assembly {
                         .wrapping_add(1),
                 })
             })
-            .flatten();
-        let Some(report) = report else {
-            return;
-        };
-
-        tokio::task::spawn_local(async move {
-            if let Err(e) = vsconn.report_link_status(report).await {
-                warn!(target: PEER_MGMT, "failed to report node link status to Visa Service: {e}");
-            }
-        });
+            .flatten()
     }
 
     /// Temporary? function to find a link based on the actor address

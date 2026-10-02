@@ -88,6 +88,7 @@ pub async fn launch(
             };
 
             if connected {
+                asm.report_active_node_link_statuses().await;
                 match vs_handle.register_vss(vss_addr).await {
                     Ok(ops) => {
                         info!(target: STARTUP, "registered VSS, received {} pending visa ops", ops.len());

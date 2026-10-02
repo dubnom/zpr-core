@@ -579,9 +579,11 @@ fn main() -> ExitCode {
         mgmt_substrate_egress: MgmtSubstrateEgress::new(mgmt_substrate_inq),
         actor_output_requeue: ActorOutputRequeue::new(actor_requeue_inqs),
         vsconn: vsconn.as_ref().map(|c| c.handle()),
-        visa_table: std::sync::RwLock::new(visa_table::VisaTable::new_with_vs_visas(
-            &node_zpr_addr,
-        )),
+        visa_table: std::sync::RwLock::new(if config.local_vs_dock {
+            visa_table::VisaTable::new_with_vs_visas(&node_zpr_addr)
+        } else {
+            visa_table::VisaTable::new()
+        }),
         vs_auth_services: std::sync::RwLock::new(AuthServicesList::default()),
         deferred_vs_connect: Mutex::new(None),
         capture_queue: Capture::new(cap_inq),
@@ -665,6 +667,59 @@ fn main() -> ExitCode {
                     .unwrap()
                     .link_state_machine
                     .add_internal_actor_address(addr.into());
+            }
+
+            let bootstrap_peers = asm.config.get().node_peers.clone();
+            for peer in bootstrap_peers {
+                match asm.start_node_peer(
+                    peer.substrate_addr.into(),
+                    peer.zpr_addr,
+                    peer.link_id.clone(),
+                    Vec::new(),
+                ) {
+                    Ok(link_id) => info!(
+                        target: STARTUP,
+                        "started configured node peer {} at {} as link {}",
+                        peer.zpr_addr,
+                        peer.substrate_addr,
+                        asm.formatted_link_id(link_id.get())
+                    ),
+                    Err(error) => {
+                        error!(
+                            target: STARTUP,
+                            "failed to start configured node peer {} at {}: {error}",
+                            peer.zpr_addr,
+                            peer.substrate_addr
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+
+            for peer in &asm.config.get().node_peers {
+                match asm.start_node_peer(
+                    peer.substrate_addr.into(),
+                    peer.zpr_addr,
+                    peer.link_id.clone(),
+                    Vec::new(),
+                ) {
+                    Ok(link_id) => info!(
+                        target: STARTUP,
+                        "started configured node peer {} at {} as link {}",
+                        peer.zpr_addr,
+                        peer.substrate_addr,
+                        asm.formatted_link_id(link_id.get())
+                    ),
+                    Err(error) => {
+                        error!(
+                            target: STARTUP,
+                            "failed to start configured node peer {} at {}: {error}",
+                            peer.zpr_addr,
+                            peer.substrate_addr
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
             }
         }
     }

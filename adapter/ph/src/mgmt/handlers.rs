@@ -222,14 +222,13 @@ pub async fn handle_hello_request(asm: &Arc<Assembly>, mut pkt: Packet) -> Handl
         }
     };
 
-    let node_peer_zpr_addr = asm
+    let is_node_peer = asm
         .peer_table
         .inspect_sync(ingress_link_id, |peer| {
-            (peer.link_state_machine.get_link_type() == LinkType::NodeToNode)
-                .then_some(peer.peer_zpr_addr)
+            peer.link_state_machine.get_link_type() == LinkType::NodeToNode
         })
-        .flatten()
-        .flatten();
+        .unwrap_or(false);
+    let local_node_zpr_addrs = asm.config.get().zpr_addr.clone();
 
     // We just emit the TLV stuff to log but only use window size and the A2A key.
     for (tlv_type, tlv_value) in &tlv_data {
@@ -241,20 +240,26 @@ pub async fn handle_hello_request(asm: &Arc<Assembly>, mut pkt: Packet) -> Handl
                 process_a2a_dh_pubkey_tlv(&asm, ingress_link_id, "HelloRequest", tlv_value)?;
             }
             tlv::DataType::BOOTSTRAP_VISA => {
-                let Some(peer_zpr_addr) = node_peer_zpr_addr else {
+                if !is_node_peer {
                     return Err(HandleMgmtError::MessageNotPermitted);
-                };
+                }
                 for value in tlv_value {
                     let tlv::TlvValue::Visa(visa) = value else {
+                        error!(target: ZDP, "{}: bootstrap TLV did not decode to a Visa", asm.formatted_link_id(ingress_link_id));
                         return Err(HandleMgmtError::BadStructure);
                     };
                     let Some(dock_pep) = visa.dock_pep.as_ref() else {
+                        error!(target: ZDP, "{}: bootstrap visa {} has no dock PEP", asm.formatted_link_id(ingress_link_id), visa.issuer_id);
                         return Err(HandleMgmtError::BadStructure);
                     };
-                    if visa.visa_type != zpr::vsapi_types::VisaType::Full
-                        || (dock_pep.source_addr != peer_zpr_addr
-                            && dock_pep.dest_addr != peer_zpr_addr)
+                    if visa.visa_type != zpr::vsapi_types::VisaType::Full {
+                        error!(target: ZDP, "{}: bootstrap visa {} has type {:?}, expected Full", asm.formatted_link_id(ingress_link_id), visa.issuer_id, visa.visa_type);
+                        return Err(HandleMgmtError::BadStructure);
+                    }
+                    if !local_node_zpr_addrs.contains(&dock_pep.source_addr)
+                        && !local_node_zpr_addrs.contains(&dock_pep.dest_addr)
                     {
+                        error!(target: ZDP, "{}: bootstrap visa {} names {} -> {}, not local node {:?}", asm.formatted_link_id(ingress_link_id), visa.issuer_id, dock_pep.source_addr, dock_pep.dest_addr, local_node_zpr_addrs);
                         return Err(HandleMgmtError::BadStructure);
                     }
                     visa_mgmt::insert_visa(asm, visa.clone())

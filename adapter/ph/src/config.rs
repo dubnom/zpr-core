@@ -1,6 +1,6 @@
 //! Static system configuration.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{self, Path, PathBuf};
@@ -134,6 +134,14 @@ pub struct Config {
 
     /// Expected peer Noise public keys, keyed by the peer's ZPR Node Address.
     pub peer_noise_keys: HashMap<IpAddr, Vec<u8>>,
+
+    /// Administrator-provisioned peers used to bootstrap node-to-node links
+    /// before the node has a route to receive a Visa Service topology update.
+    pub node_peers: Vec<NodePeerConfig>,
+
+    /// Whether this node has the Visa Service directly docked to it. Transit-only
+    /// nodes must use bootstrap visas received across their peer link instead.
+    pub local_vs_dock: bool,
 
     /// Path to a PEM file containing the Certificate Authority certificate.
     /// Optional and if present is used by the link management system to verify passed noise certificates.
@@ -562,6 +570,42 @@ impl Config {
                     self.peer_noise_keys.insert(*peer_addr, noise_key.to_vec());
                 }
             }
+            if let Some(peers) = &config.peers {
+                let mut peer_zpr_addrs = HashSet::new();
+                for peer in peers {
+                    if peer.link_id.trim().is_empty()
+                        || peer.substrate_addr.ip().is_unspecified()
+                        || peer.substrate_addr.port() == 0
+                    {
+                        return Err(ArgsError::ParseError(format!(
+                            "invalid bootstrap peer configuration for {}",
+                            peer.zpr_addr
+                        )));
+                    }
+                    if self.zpr_addr.contains(&peer.zpr_addr) {
+                        return Err(ArgsError::ParseError(format!(
+                            "bootstrap peer {} is this node's own ZPR address",
+                            peer.zpr_addr
+                        )));
+                    }
+                    if !peer_zpr_addrs.insert(peer.zpr_addr) {
+                        return Err(ArgsError::ParseError(format!(
+                            "duplicate bootstrap peer ZPR address {}",
+                            peer.zpr_addr
+                        )));
+                    }
+                    if !self.peer_noise_keys.contains_key(&peer.zpr_addr) {
+                        return Err(ArgsError::ParseError(format!(
+                            "bootstrap peer {} has no trusted Noise certificate",
+                            peer.zpr_addr
+                        )));
+                    }
+                }
+                self.node_peers.clone_from(peers);
+            }
+            if let Some(local_vs_dock) = config.local_vs_dock {
+                self.local_vs_dock = local_vs_dock;
+            }
         }
         Ok(())
     }
@@ -679,6 +723,8 @@ impl Default for Config {
             private_key_data: None,
             advertised_substrate_addr: None,
             peer_noise_keys: HashMap::new(),
+            node_peers: Vec::new(),
+            local_vs_dock: true,
             auth_private_key: None,
             tun_if: None,
             logging: Vec::new(),
@@ -731,6 +777,15 @@ pub struct NodeConfigSection {
     pub advertised_substrate_addr: Option<String>,
     /// Peer Node Address to PEM certificate containing its expected Noise key.
     pub peer_noise_certificates: Option<HashMap<IpAddr, PathBuf>>,
+    pub peers: Option<Vec<NodePeerConfig>>,
+    pub local_vs_dock: Option<bool>,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct NodePeerConfig {
+    pub zpr_addr: IpAddr,
+    pub substrate_addr: SocketAddr,
+    pub link_id: String,
 }
 
 // Global section is shared by nodes and adapters.
@@ -988,6 +1043,12 @@ mod test {
     fn test_node_config_peer_noise_certificates_parse() {
         let toml_str = r#"
             advertised_substrate_addr = "203.0.113.7:5000"
+            local_vs_dock = false
+
+            [[peers]]
+            zpr_addr = "fd5a:5052::2"
+            substrate_addr = "192.0.2.2:5000"
+            link_id = "node-a-node-b"
 
             [peer_noise_certificates]
             "fd5a:5052::2" = "peer-two.pem"
@@ -998,6 +1059,11 @@ mod test {
             config.peer_noise_certificates.unwrap().get(&peer_addr),
             Some(&PathBuf::from("peer-two.pem"))
         );
+        let peer = &config.peers.unwrap()[0];
+        assert_eq!(peer.zpr_addr, peer_addr);
+        assert_eq!(peer.substrate_addr, "192.0.2.2:5000".parse().unwrap());
+        assert_eq!(peer.link_id, "node-a-node-b");
+        assert_eq!(config.local_vs_dock, Some(false));
     }
 
     #[test]
@@ -1017,6 +1083,8 @@ mod test {
                 peer_addr,
                 PathBuf::from("peer-two.pem"),
             )])),
+            peers: None,
+            local_vs_dock: None,
         };
         let mut config = Config::default();
         config
@@ -1032,6 +1100,29 @@ mod test {
 
         std::fs::remove_file(cert_path).unwrap();
         std::fs::remove_dir(config_dir).unwrap();
+    }
+
+    #[test]
+    fn test_node_config_requires_a_pinned_key_for_each_bootstrap_peer() {
+        let peer_zpr_addr: IpAddr = "fd5a:5052::2".parse().unwrap();
+        let peer = NodePeerConfig {
+            zpr_addr: peer_zpr_addr,
+            substrate_addr: "192.0.2.2:5000".parse().unwrap(),
+            link_id: "node-a-node-b".into(),
+        };
+        let mut config = Config::default();
+        let error = config
+            .set_from_node(
+                &Some(NodeConfigSection {
+                    advertised_substrate_addr: None,
+                    peer_noise_certificates: None,
+                    peers: Some(vec![peer]),
+                    local_vs_dock: None,
+                }),
+                std::path::Path::new("."),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("no trusted Noise certificate"));
     }
 
     #[test]
