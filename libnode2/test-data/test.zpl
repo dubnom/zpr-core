@@ -1,7 +1,9 @@
 
 
 define Web as a service.
-allow user to access Web.
+
+service Web as json {"service_class":"Web"}.
+  allow user.
 
 
 

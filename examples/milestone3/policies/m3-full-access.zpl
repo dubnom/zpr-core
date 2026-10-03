@@ -1,17 +1,25 @@
-Define adapter as a device with cn.
+Define adapter as a device with zpr.adapter.cn.
 
-Define NextCloud as a service with cn:'nc.zpr.org'.
+Define NextCloud as a service with device.zpr.adapter.cn:'nc.zpr.org'.
 
-Define RfcDB as a service with cn:'web.zpr.org'.
+Define RfcDB as a service with device.zpr.adapter.cn:'web.zpr.org'.
 
-Define NextCloudPing as a service with cn:'nc.zpr.org'.
+Define NextCloudPing as a service with device.zpr.adapter.cn:'nc.zpr.org'.
 
-Define RfcDBPing as a service with cn:'web.zpr.org'.
+Define RfcDBPing as a service with device.zpr.adapter.cn:'web.zpr.org'.
 
 # Allow any valid adapter to access our two services.
-Allow cn: adapter to access NextCloud.
-Allow cn: adapter to access RfcDB.
+
+service NextCloud as json {"service_class":"NextCloud"}.
+  allow zpr.adapter.cn: adapter.
+
+service RfcDB as json {"service_class":"RfcDB"}.
+  allow zpr.adapter.cn: adapter.
 
 # Allow any valid adapter to ping the web and nextcloud.
-Allow cn: adapter to access NextCloudPing.
-Allow cn: adapter to access RfcDBPing.
+
+service NextCloudPing as json {"service_class":"NextCloudPing"}.
+  allow zpr.adapter.cn: adapter.
+
+service RfcDBPing as json {"service_class":"RfcDBPing"}.
+  allow zpr.adapter.cn: adapter.

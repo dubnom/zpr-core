@@ -243,9 +243,11 @@ We assume:
 
 Create a file called `zpr-full-access.zpl` with these contents:
 
-```
+```zpl
 Define WebService as a service with device.zpr.adapter.cn:'web.zpr.org'.
-Allow user to access WebService.
+
+provide WebService at web.svc.zpr over TCP 80.
+  allow user.
 ```
 
 Then write a configuration file.
