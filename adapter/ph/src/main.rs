@@ -27,6 +27,7 @@ mod compress;
 mod config;
 mod counters;
 mod defs;
+mod deny_cache;
 mod dns_proxy;
 mod fastpath;
 mod fastpath_io;
@@ -584,6 +585,7 @@ fn main() -> ExitCode {
         } else {
             visa_table::VisaTable::new()
         }),
+        denied_flow_cache: deny_cache::DeniedFlowCache::new(config.denied_flow_backoff_ms),
         vs_auth_services: std::sync::RwLock::new(AuthServicesList::default()),
         deferred_vs_connect: Mutex::new(None),
         capture_queue: Capture::new(cap_inq),

@@ -19,6 +19,7 @@ pub mod classifier;
 pub mod compress;
 pub mod counters;
 pub mod defs;
+pub mod deny_cache;
 pub mod fastpath_io;
 pub mod fastpath_worker;
 pub mod flow_control;

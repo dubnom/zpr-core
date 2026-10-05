@@ -393,6 +393,13 @@ impl FastpathWorker {
                     return;
                 };
 
+                if pep.blackhole {
+                    drop(pep);
+                    drop(ingress_peer_state);
+                    self.drop_and_count(pkt, FastpathCounterType::InPacksDrop);
+                    return;
+                }
+
                 // TODO: policy enforcement
 
                 egress_link_id = pep.next_hop.0;

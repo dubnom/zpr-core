@@ -12,14 +12,15 @@ VS_BIN="${VS_BIN:-$(realpath "$(dirname "$0")/vs")}"
 VS_ADMIN_BIN="${VS_ADMIN_BIN:-$(realpath "$(dirname "$0")/vs-admin")}"
 VALKEY_SERVER_BIN="${VALKEY_SERVER_BIN:-$(realpath -s "$(dirname "$0")/valkey-server")}"
 
-PREGEN=$(realpath "$(dirname $0)/pregen")
+PREGEN=$(realpath "$(dirname "$0")/pregen")
 NODE_AUTH_PRIVATE_KEY="${NODE_AUTH_PRIVATE_KEY:-$PREGEN/node-rsa-key.pem}"
 
 # netem parameters to configure on all links; e.g. "loss random 10%"
 # blank for no netem
 NETEM_PARAMS=${NETEM_PARAMS:-}
 
-source "$(dirname $0)/lib/common_funcs.sh"
+# shellcheck source=lib/common_funcs.sh
+source "$(dirname "$0")/lib/common_funcs.sh"
 
 ZPR_USER=$USER
 
@@ -27,7 +28,6 @@ ZPR_USER=$USER
 NODE_SUBSTRATE_ADDR_VS=10.0.0.1
 NODE_SUBSTRATE_ADDR_A=10.0.1.1
 NODE_SUBSTRATE_ADDR_B=10.0.2.1
-NODE_SUBSTRATE_ADDR_C=10.0.3.1
 NODE_SUBSTRATE_ADDR_C_ALT=10.0.3.129  # Used for testing routing when a dock has multiple addresses.
 VS_SUBSTRATE_ADDR=10.0.0.2
 A_SUBSTRATE_ADDR=10.0.1.2
@@ -38,7 +38,8 @@ C_SUBSTRATE_ADDR=10.0.3.2
 ACTOR_PROTOCOL="ipv6"
 NUM_ACTORS=3
 # Note: POLICY_BIN, NODE_ZPR_ADDR, VS_ZPR_ADDR, A_ZPR_ADDR, and B_ZPR_ADDR are defined by parsing the input arguments.
-source "$(dirname $0)/lib/parse_arguments.sh"
+# shellcheck source=lib/parse_arguments.sh
+source "$(dirname "$0")/lib/parse_arguments.sh"
 
 if [ ! -e "$VS_BIN" ]; then
   echo "vs binary not found, expected it at $VS_BIN"
@@ -76,6 +77,11 @@ if [ ! -x "$PH_DEBUG_BIN" ]; then
   exit 1
 fi
 
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 is required for the denied-flow backoff integration probe"
+  exit 1
+fi
+
 if [ ! -e "$NODE_AUTH_PRIVATE_KEY" ]; then
   echo "node auth private key not found: $NODE_AUTH_PRIVATE_KEY"
   exit 1
@@ -95,6 +101,79 @@ ADAPTER3_CAP_SOCK=adapter3_cap.sock
 function counters() {
   SOCKET=$1
   "$PH_DEBUG_BIN" -p "$SOCKET" counters
+}
+
+function counter_value() {
+  local socket=$1
+  local counter_name=$2
+  counters "$socket" | awk -F': ' -v name="$counter_name" '$1 == name { print $2; found = 1 } END { if (!found) exit 1 }'
+}
+
+function send_denied_udp_probe() {
+  local source_port=$1
+  sudo ip netns exec zpr-a python3 -c '
+import socket, sys
+destination, source_port = sys.argv[1], int(sys.argv[2])
+sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+sock.bind(("::", source_port))
+sock.sendto(b"denied-flow-backoff-probe", (destination, 33434))
+sock.close()
+' "$NODE_ZPR_ADDR" "$source_port"
+}
+
+function denied_flow_backoff_test() {
+  local requests_before
+  local backoff_before
+  local denials_before
+  local requests_after
+  local backoff_after
+  local denials_after
+
+  if [[ "$ACTOR_PROTOCOL" != "ipv6" ]]; then
+    echo "Skipping denied-flow backoff probe: Node address is IPv6"
+    return 0
+  fi
+
+  requests_before=$(counter_value "$NODE_SOCK" "Visa Requested") || return 1
+  backoff_before=$(counter_value "$NODE_SOCK" "Visa Request Backoff Denied") || return 1
+  denials_before=$(counter_value "$NODE_SOCK" "Visa Request Denied") || return 1
+
+  # Distinct UDP source ports force two Adapter binds; the node normalizes the
+  # source port when looking up the completed denial.
+  send_denied_udp_probe 43101 || return 1
+  for _ in {1..15}; do
+    denials_after=$(counter_value "$NODE_SOCK" "Visa Request Denied") || return 1
+    if (( denials_after > denials_before )); then
+      break
+    fi
+    sleep 1
+  done
+  if (( denials_after != denials_before + 1 )); then
+    echo "ERROR: expected the first denied flow to reach Visa Service"
+    return 1
+  fi
+
+  send_denied_udp_probe 43102 || return 1
+  for _ in {1..5}; do
+    backoff_after=$(counter_value "$NODE_SOCK" "Visa Request Backoff Denied") || return 1
+    if (( backoff_after > backoff_before )); then
+      break
+    fi
+    sleep 1
+  done
+
+  requests_after=$(counter_value "$NODE_SOCK" "Visa Requested") || return 1
+  backoff_after=$(counter_value "$NODE_SOCK" "Visa Request Backoff Denied") || return 1
+
+  if (( requests_after - requests_before != 1 )); then
+    echo "ERROR: expected one Visa Service request for two denied binds; observed $((requests_after - requests_before))"
+    return 1
+  fi
+  if (( backoff_after - backoff_before != 1 )); then
+    echo "ERROR: expected one locally suppressed denied bind; observed $((backoff_after - backoff_before))"
+    return 1
+  fi
+  return 0
 }
 
 
@@ -118,7 +197,9 @@ destroy_network
 create_network
 
 if [ -n "$NETEM_PARAMS" ]
-then configure_netem $NETEM_PARAMS  # split on whitespace
+then
+  read -r -a netem_args <<< "$NETEM_PARAMS"
+  configure_netem "${netem_args[@]}"
 fi
 
 create_ca_key_and_cert ca
@@ -135,6 +216,12 @@ cp "$PREGEN/actor3-rsa.key" actor3-rsa.key
 cp "$PREGEN/actorvs-rsa.key" actorvs-rsa.key
 
 emit_vs_config ca vs.zpr > vs-config.toml
+cat > node-backoff.toml <<'EOF'
+[global]
+
+[node]
+denied_flow_backoff_ms = 60000
+EOF
 
 #
 # Launch ValKey + Visa Service
@@ -165,6 +252,7 @@ echo "Launching Node"
 
 sudo -E ip netns exec zpr-node sudo -E -u "$ZPR_USER" "$PH_BIN" \
   node \
+  --config-file node-backoff.toml \
   --logging "$DEBUG_TARGETS" \
   --control-path "$NODE_SOCK" \
   --capture-path "$NODE_CAP_SOCK" \
@@ -253,20 +341,20 @@ fi
 PASS=0
 echo "Wait for TUN carrier..."
 wait_for 15 check_carrier zpr-node tun0 || { PASS=1; }
-if [[ "$PASS" == 0 ]] then
+if [[ "$PASS" == 0 ]]; then
 wait_for 15 check_carrier zpr-vs tun0 || { PASS=1; }
 fi
-if [[ "$PASS" == 0 ]] then
+if [[ "$PASS" == 0 ]]; then
 wait_for 15 check_carrier zpr-a tun0 || { PASS=1; }
 fi
-if [[ "$PASS" == 0 ]] then
+if [[ "$PASS" == 0 ]]; then
 wait_for 15 check_carrier zpr-b tun0 || { PASS=1; }
 fi
 if [[ "$PASS" == 0 && "$NUM_ACTORS" -ge 3 ]]; then
   wait_for 15 check_carrier zpr-c tun0 || { PASS=1; }
 fi
 
-if [[ "$PASS" == 0 ]] then
+if [[ "$PASS" == 0 ]]; then
 echo "Carrier has arrived."
 # This sleep solves a display issue because magic
 sleep 1
@@ -279,6 +367,10 @@ echo "TEST STARTING"
 
 PASS=0
 if ! ping_test
+then PASS=1
+fi
+
+if [[ "$PASS" == 0 ]] && ! denied_flow_backoff_test
 then PASS=1
 fi
 

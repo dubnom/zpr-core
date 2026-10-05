@@ -4,6 +4,8 @@ Core ZPR components
 We are currently working towards Milestone 6.
 - See the [current iteration and backlog](https://github.com/orgs/org-zpr/projects/1/views/3).
 - See the [roadmap](https://github.com/orgs/org-zpr/projects/3/views/8).
+- See the [adapter platform support plan](ADAPTER_PLATFORM_SUPPORT_PLAN.md) for
+  the current Linux/macOS baseline and proposed Windows, Android, and iOS work.
 
 
 
@@ -155,9 +157,23 @@ self_addr = "129.6.7.1:5000"
 zpr_addr = [ "fd5a:5052:90de::1" ]
 tun_if = "tun9"
 
+[node]
+# Cache explicit visa denials locally before asking VS again. Defaults to
+# 1000 ms; 0 disables the backoff; the maximum is 60000 ms.
+denied_flow_backoff_ms = 1000
+
 [authentication]
 auth_private_key = "node-private-key.pem"
 ```
+
+The node is authoritative: it blocks a matching retry during this window even
+if the adapter ignores the retry hint. The bounded cache is keyed by ingress
+adapter link, source/destination addresses, protocol, and destination port;
+source-port changes do not bypass it. It caches only explicit visa denials,
+not timeouts or service errors. Policy changes are reflected after the
+configured window because the current node protocol has no denial-cache
+invalidation message. The adapter uses the node's bounded hint only to reduce
+bind-request traffic; it is not a security boundary.
 
 
 ### Create a signed noise certificate for the visa service adapter

@@ -2,6 +2,7 @@ use crate::adapter_tables;
 use crate::address_pool::AddressPool;
 use crate::capture_worker::CaptureWorker;
 use crate::counters::*;
+use crate::deny_cache::DeniedFlowCache;
 use crate::flow_control::FlowControl;
 use crate::km_cert_exchange::KmCertExchange;
 use crate::km_multiplexor::KmState;
@@ -68,6 +69,7 @@ pub struct Assembly {
     pub deferred_vs_connect: Mutex<Option<(LinkId, IpAddress, ConnectRequest)>>, // present only on nodes, the VS adapter's connect request and self-granted address, held until the node has VSAPI access
 
     pub visa_table: std::sync::RwLock<visa_table::VisaTable>, // Only for nodes
+    pub denied_flow_cache: DeniedFlowCache,
 
     // Used to intercept packets that are unencrypted but still have ZDP headers
     pub capture_queue: Capture,
@@ -708,6 +710,7 @@ pub mod test {
                 reload::Layer::new(fmt::layer().with_filter(Targets::new()));
             reload_handle
         });
+        let denied_flow_backoff_ms = config.get().denied_flow_backoff_ms;
 
         Assembly {
             ph_mode,
@@ -716,6 +719,7 @@ pub mod test {
             actor_output_requeue,
             vsconn,
             visa_table,
+            denied_flow_cache: DeniedFlowCache::new(denied_flow_backoff_ms),
             vs_auth_services: std::sync::RwLock::new(AuthServicesList::default()),
             deferred_vs_connect: Mutex::new(None),
             capture_queue,

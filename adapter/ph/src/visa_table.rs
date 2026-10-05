@@ -547,11 +547,13 @@ mod tests {
         let pep1 = PftPep {
             next_hop: ForwardingEntry(link_id, 1),
             visa_id: visa1,
+            blackhole: false,
         };
 
         let pep2 = PftPep {
             next_hop: ForwardingEntry(link_id, 2),
             visa_id: visa2,
+            blackhole: false,
         };
 
         let peer_state = asm
@@ -615,6 +617,7 @@ mod tests {
         let pep = PftPep {
             next_hop: ForwardingEntry(link_a, 1),
             visa_id,
+            blackhole: false,
         };
         let tether_id = peer_state.pft.insert(pep).unwrap();
         visa_table
@@ -664,6 +667,7 @@ mod tests {
         let pep = PftPep {
             next_hop: ForwardingEntry(link_b, 1),
             visa_id,
+            blackhole: false,
         };
         let tether_id = peer_b.pft.insert(pep).unwrap();
         visa_table
@@ -713,6 +717,7 @@ mod tests {
         let pep_a = PftPep {
             next_hop: ForwardingEntry(link_a, 1),
             visa_id,
+            blackhole: false,
         };
         let tether_a = peer_a.pft.insert(pep_a).unwrap();
         visa_table
@@ -723,6 +728,7 @@ mod tests {
         let pep_b = PftPep {
             next_hop: ForwardingEntry(link_b, 1),
             visa_id,
+            blackhole: false,
         };
         let tether_b = peer_b.pft.insert(pep_b).unwrap();
         visa_table
@@ -783,6 +789,7 @@ mod tests {
         let pep_a = PftPep {
             next_hop: ForwardingEntry(link_a, 1),
             visa_id: visa1_id,
+            blackhole: false,
         };
         let tether_a = peer_a.pft.insert(pep_a).unwrap();
         visa_table
@@ -793,6 +800,7 @@ mod tests {
         let pep_b = PftPep {
             next_hop: ForwardingEntry(link_b, 1),
             visa_id: visa2_id,
+            blackhole: false,
         };
         let tether_b = peer_b.pft.insert(pep_b).unwrap();
         visa_table

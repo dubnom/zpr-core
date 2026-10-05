@@ -20,6 +20,18 @@ const PEER_FORWARDING_TABLE_SIZE: usize = 1 << 20; // 1 million
 pub struct PftPep {
     pub next_hop: ForwardingEntry,
     pub visa_id: VisaId,
+    pub blackhole: bool,
+}
+
+impl PftPep {
+    /// Construct an explicit discard entry without assigning a visa or next hop.
+    pub fn blackhole() -> Self {
+        Self {
+            next_hop: ForwardingEntry(0, 0),
+            visa_id: 0,
+            blackhole: true,
+        }
+    }
 }
 
 pub struct PeerForwardingTable {

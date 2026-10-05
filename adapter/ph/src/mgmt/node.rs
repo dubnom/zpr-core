@@ -19,6 +19,8 @@ use crate::visa_table::VisaTableError;
 
 use dashmap::DashMap;
 use std::num::NonZero;
+use std::sync::Mutex;
+use zpr::packet_info::StreamId;
 use zpr::vsapi_types::{CommFlag, PacketDesc, VisaRequest, VsapiFiveTuple, vsapi_ip_number};
 
 /// State of an in-progress inbound bind or stream ID request.
@@ -66,6 +68,7 @@ pub struct NodePeerState {
     /// pair identifying the in-progress inbound bind request this request
     /// was issued on behalf of.
     awaiting_next_hop_bind_table: DashMap<TxnHandle, (NonZero<LinkId>, TxnId)>,
+    policy_denial_stream: Mutex<Option<(StreamId, usize)>>,
 }
 
 impl NodePeerState {
@@ -73,7 +76,53 @@ impl NodePeerState {
         Self {
             bind_request_state: DashMap::new(),
             awaiting_next_hop_bind_table: DashMap::new(),
+            policy_denial_stream: Mutex::new(None),
         }
+    }
+
+    /// Reuse one blackhole PFT stream for policy-denied binds on this adapter link.
+    pub fn acquire_policy_denial_stream(
+        &self,
+        pft: &crate::forwarding_tables::PeerForwardingTable,
+    ) -> Result<StreamId, ()> {
+        let mut cached = self
+            .policy_denial_stream
+            .lock()
+            .expect("policy denial stream mutex poisoned");
+        if let Some((stream_id, references)) = cached.as_mut() {
+            if pft.get(*stream_id).is_some_and(|pep| pep.blackhole) {
+                *references += 1;
+                return Ok(*stream_id);
+            }
+        }
+        let stream_id = pft.insert(crate::forwarding_tables::PftPep::blackhole())?;
+        *cached = Some((stream_id, 1));
+        Ok(stream_id)
+    }
+
+    /// Release one adapter's binding reference to the reusable blackhole stream.
+    pub fn release_policy_denial_stream(
+        &self,
+        pft: &crate::forwarding_tables::PeerForwardingTable,
+        stream_id: StreamId,
+    ) -> bool {
+        let mut cached = self
+            .policy_denial_stream
+            .lock()
+            .expect("policy denial stream mutex poisoned");
+        let Some((cached_id, references)) = cached.as_mut() else {
+            return false;
+        };
+        if *cached_id != stream_id {
+            return false;
+        }
+        if *references > 1 {
+            *references -= 1;
+        } else {
+            pft.remove(stream_id);
+            *cached = None;
+        }
+        true
     }
 }
 
@@ -154,14 +203,15 @@ pub fn bind_actor_address(
 
     // Check if we already have a visa which matches this traffic.
 
-    let visa_table = asm.visa_table.read().unwrap();
+    let matched_visa = {
+        let visa_table = asm.visa_table.read().unwrap();
+        visa_table.match_traffic(&five_tuple)
+    };
 
-    if let Some(matched) = visa_table.match_traffic(&five_tuple) {
+    if let Some(matched) = matched_visa {
         // We matched a visa we already have.
 
         let matched_visa_id = matched;
-        drop(visa_table);
-
         let egress_link_id_query = visa_mgmt::get_egress_link_for_visa(asm, matched_visa_id);
         match egress_link_id_query {
             Ok(link_id) => {
@@ -195,6 +245,15 @@ pub fn bind_actor_address(
                 panic!("Got unexpected error type {e}");
             }
         }
+    }
+
+    if asm
+        .denied_flow_cache
+        .remaining(ingress_link_id.get(), &five_tuple)
+        .is_some()
+    {
+        asm.counters.management[ManagementCounterType::VisaRequestBackoffDenied].increment();
+        return requested_visa_denied_silently(asm, ingress_link_id, txn_id, five_tuple);
     }
 
     // We do not have an existing visa.  Request one.
@@ -243,6 +302,7 @@ pub fn bind_actor_address(
         asm.clone(),
         ingress_link_id,
         txn_id,
+        five_tuple,
         visa_req,
     ));
 
@@ -258,6 +318,7 @@ async fn visa_request_task(
     asm: Arc<Assembly>,
     ingress_link_id: NonZero<LinkId>,
     txn_id: TxnId,
+    five_tuple: FiveTuple,
     visa_req: VisaRequest,
 ) {
     match asm.vsconn.as_ref().unwrap().visa_request(visa_req).await {
@@ -282,7 +343,9 @@ async fn visa_request_task(
         Ok(zpr::vsapi_types::VisaDecision::Denied(deny_code)) => {
             asm.counters.management[ManagementCounterType::VisaRequestDenied].increment();
             debug!(target: FLOW_MGMT, "visa request denied: {deny_code:?}");
-            requested_visa_denied(&asm, ingress_link_id, txn_id)
+            asm.denied_flow_cache
+                .remember_denial(ingress_link_id.get(), &five_tuple);
+            requested_visa_denied_silently(&asm, ingress_link_id, txn_id, five_tuple)
         }
 
         Err(err) => {
@@ -523,6 +586,52 @@ fn requested_visa_denied(asm: &Arc<Assembly>, ingress_link_id: NonZero<LinkId>, 
     bind_reject(asm, ingress_link_id, txn_id, "policy error")
 }
 
+fn requested_visa_denied_silently(
+    asm: &Arc<Assembly>,
+    ingress_link_id: NonZero<LinkId>,
+    txn_id: TxnId,
+    five_tuple: FiveTuple,
+) {
+    let Some(peer_state) = asm.peer_table.get(ingress_link_id.get()) else {
+        return;
+    };
+    if !matches!(peer_state.peer_type(), PeerType::Adapter) {
+        drop(peer_state);
+        return bind_reject(asm, ingress_link_id, txn_id, "bind unavailable");
+    }
+    let tether_id = match peer_state
+        .node_state
+        .acquire_policy_denial_stream(&peer_state.pft)
+    {
+        Ok(tether_id) => tether_id,
+        Err(()) => {
+            drop(peer_state);
+            return bind_reject(asm, ingress_link_id, txn_id, "bind unavailable");
+        }
+    };
+    if peer_state
+        .node_state
+        .bind_request_state
+        .remove(&txn_id)
+        .is_none()
+    {
+        peer_state
+            .node_state
+            .release_policy_denial_stream(&peer_state.pft, tether_id);
+        return;
+    }
+    drop(peer_state);
+    requests::send_bind_actor_address_success_response(
+        asm,
+        ingress_link_id.get(),
+        txn_id,
+        tether_id,
+        crate::tc::Ip5TupleTc::new(five_tuple),
+        None,
+    )
+    .enqueue();
+}
+
 /// Install the given tether into the PFT.
 ///
 /// Essentially this is the core implementation of `install_tether()`,
@@ -639,6 +748,7 @@ fn requested_tether_granted(
     let pep = forwarding_tables::PftPep {
         next_hop: ForwardingEntry(egress_link_id.get(), egress_tether_id),
         visa_id,
+        blackhole: false,
     };
 
     let ingress_tether_id = ingress_tether_entry.insert(pep);
@@ -867,6 +977,17 @@ pub fn unbind_stream(asm: &Arc<Assembly>, ingress_link_id: NonZero<LinkId>, stre
         return;
     };
 
+    if pft_pep.blackhole {
+        drop(pft_pep);
+        if !peer_table
+            .node_state
+            .release_policy_denial_stream(&peer_table.pft, stream_id)
+        {
+            warn!(target: FLOW_MGMT, "{}: unbind request for unknown policy-denial stream {stream_id}", asm.formatted_link_id(ingress_link_id.get()));
+        }
+        return;
+    }
+
     // Remove entry from peer forwarding table
     peer_table.pft.remove(stream_id);
 
@@ -889,4 +1010,30 @@ pub fn unbind_stream(asm: &Arc<Assembly>, ingress_link_id: NonZero<LinkId>, stre
 
     // Issue unbind request to next hop
     requests::send_unbind_egress_stream_request(asm, pft_pep.next_hop.0, stream_id).enqueue();
+}
+
+#[cfg(test)]
+mod policy_denial_stream_tests {
+    use super::NodePeerState;
+    use crate::forwarding_tables::PeerForwardingTable;
+
+    #[test]
+    fn reuses_blackhole_stream_until_last_unbind() {
+        let node_state = NodePeerState::new();
+        let pft = PeerForwardingTable::new();
+
+        let first_stream = node_state.acquire_policy_denial_stream(&pft).unwrap();
+        let second_stream = node_state.acquire_policy_denial_stream(&pft).unwrap();
+
+        assert_eq!(first_stream, second_stream);
+        assert_eq!(pft.len(), 1);
+        assert!(pft.get(first_stream).is_some_and(|pep| pep.blackhole));
+
+        assert!(node_state.release_policy_denial_stream(&pft, first_stream));
+        assert!(pft.get(first_stream).is_some());
+
+        assert!(node_state.release_policy_denial_stream(&pft, second_stream));
+        assert!(pft.get(first_stream).is_none());
+        assert_eq!(pft.len(), 0);
+    }
 }

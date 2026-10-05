@@ -144,6 +144,7 @@ pub enum ManagementCounterType {
     VisaRequestSuccess,
     VisaRequestDenied,
     VisaRequestError,
+    VisaRequestBackoffDenied,
 }
 
 impl FastpathCounterType {
@@ -233,6 +234,7 @@ impl ManagementCounterType {
             Self::VisaRequestSuccess => "Visa Request Success",
             Self::VisaRequestDenied => "Visa Request Denied",
             Self::VisaRequestError => "Visa Request Error",
+            Self::VisaRequestBackoffDenied => "Visa Request Backoff Denied",
         }
     }
 }

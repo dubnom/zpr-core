@@ -46,6 +46,8 @@ pub const DEFAULT_ZDPR_RETRY_TIMER: std::time::Duration = std::time::Duration::f
 /// Used for specific messages to limit the number of ZDPR retries before giving up.
 /// (Not a global default!)
 pub const DEFAULT_ZDPR_RETRY_LIMIT: u8 = 3;
+pub const DEFAULT_DENIED_FLOW_BACKOFF_MS: u64 = 1_000;
+pub const MAX_DENIED_FLOW_BACKOFF_MS: u64 = 60_000;
 
 pub const LINK_HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub const DEFAULT_TERMINATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
@@ -142,6 +144,9 @@ pub struct Config {
     /// Whether this node has the Visa Service directly docked to it. Transit-only
     /// nodes must use bootstrap visas received across their peer link instead.
     pub local_vs_dock: bool,
+
+    /// Node-only, bounded local suppression window after an explicit visa denial.
+    pub denied_flow_backoff_ms: u64,
 
     /// Path to a PEM file containing the Certificate Authority certificate.
     /// Optional and if present is used by the link management system to verify passed noise certificates.
@@ -606,6 +611,14 @@ impl Config {
             if let Some(local_vs_dock) = config.local_vs_dock {
                 self.local_vs_dock = local_vs_dock;
             }
+            if let Some(backoff_ms) = config.denied_flow_backoff_ms {
+                if backoff_ms > MAX_DENIED_FLOW_BACKOFF_MS {
+                    return Err(ArgsError::ParseError(format!(
+                        "node.denied_flow_backoff_ms must be between 0 and {MAX_DENIED_FLOW_BACKOFF_MS}"
+                    )));
+                }
+                self.denied_flow_backoff_ms = backoff_ms;
+            }
         }
         Ok(())
     }
@@ -725,6 +738,7 @@ impl Default for Config {
             peer_noise_keys: HashMap::new(),
             node_peers: Vec::new(),
             local_vs_dock: true,
+            denied_flow_backoff_ms: DEFAULT_DENIED_FLOW_BACKOFF_MS,
             auth_private_key: None,
             tun_if: None,
             logging: Vec::new(),
@@ -779,6 +793,8 @@ pub struct NodeConfigSection {
     pub peer_noise_certificates: Option<HashMap<IpAddr, PathBuf>>,
     pub peers: Option<Vec<NodePeerConfig>>,
     pub local_vs_dock: Option<bool>,
+    /// Node-authoritative denial backoff. Zero disables it; maximum is 60 seconds.
+    pub denied_flow_backoff_ms: Option<u64>,
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -1040,6 +1056,32 @@ mod test {
     }
 
     #[test]
+    fn test_node_denied_flow_backoff_config_bounds() {
+        assert_eq!(
+            Config::default().denied_flow_backoff_ms,
+            DEFAULT_DENIED_FLOW_BACKOFF_MS
+        );
+
+        for (backoff_ms, expected) in [(0, 0), (1_500, 1_500), (60_000, 60_000)] {
+            let node: NodeConfigSection =
+                toml::from_str(&format!("denied_flow_backoff_ms = {backoff_ms}")).unwrap();
+            let mut config = Config::default();
+            config.set_from_node(&Some(node), Path::new(".")).unwrap();
+            assert_eq!(config.denied_flow_backoff_ms, expected);
+        }
+
+        let node: NodeConfigSection = toml::from_str("denied_flow_backoff_ms = 60001").unwrap();
+        let mut config = Config::default();
+        assert!(
+            config
+                .set_from_node(&Some(node), Path::new("."))
+                .unwrap_err()
+                .to_string()
+                .contains("denied_flow_backoff_ms")
+        );
+    }
+
+    #[test]
     fn test_node_config_peer_noise_certificates_parse() {
         let toml_str = r#"
             advertised_substrate_addr = "203.0.113.7:5000"
@@ -1085,6 +1127,7 @@ mod test {
             )])),
             peers: None,
             local_vs_dock: None,
+            denied_flow_backoff_ms: None,
         };
         let mut config = Config::default();
         config
@@ -1118,6 +1161,7 @@ mod test {
                     peer_noise_certificates: None,
                     peers: Some(vec![peer]),
                     local_vs_dock: None,
+                    denied_flow_backoff_ms: None,
                 }),
                 std::path::Path::new("."),
             )
