@@ -125,13 +125,18 @@ impl svc::Server for AdminServiceImpl {
         let mut counters_builder = results_builder
             .reborrow()
             .init_management()
-            .init_counters(self.asm.counters.management.len() as u32);
+            .init_counters(self.asm.counters.management.len() as u32 + 1);
 
         for (i, (key, &ref value)) in self.asm.counters.management.iter().enumerate() {
             let mut counter = counters_builder.reborrow().get(i as u32);
             counter.set_name(key.name());
             counter.set_val(value.get_count());
         }
+        let mut buffered = counters_builder
+            .reborrow()
+            .get(self.asm.counters.management.len() as u32);
+        buffered.set_name("Buffered Denials");
+        buffered.set_val(self.asm.denied_flow_cache.active_count() as u64);
 
         {
             let fastpaths = self.asm.counters.fastpaths.lock().unwrap();

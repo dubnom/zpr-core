@@ -479,10 +479,15 @@ async fn watch_task(service: svc::Client, interval: u64) -> Result<(), CliError>
         println!("Increases in management counts:");
         let counters = management.get_counters()?;
         for (i, counter) in counters.iter().enumerate() {
+            let name = counter.get_name()?.to_str()?;
             println!(
                 "{}: {}",
-                counter.get_name()?.to_str()?,
-                counter.get_val() - mgmt_values[i]
+                name,
+                if name == "Buffered Denials" {
+                    counter.get_val()
+                } else {
+                    counter.get_val().saturating_sub(mgmt_values[i])
+                }
             );
             mgmt_values[i] = counter.get_val();
         }

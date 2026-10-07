@@ -34,6 +34,17 @@ pub struct DeniedFlowCache {
 }
 
 impl DeniedFlowCache {
+    /// Number of active cached flows, excluding expired entries even without new traffic.
+    pub fn active_count(&self) -> usize {
+        self.active_count_at(Instant::now())
+    }
+
+    fn active_count_at(&self, now: Instant) -> usize {
+        let mut entries = self.entries.lock().expect("denied-flow cache poisoned");
+        entries.retain(|_, expires_at| *expires_at > now);
+        entries.len()
+    }
+
     /// Create a cache using the node-configured denial backoff.
     pub fn new(backoff_ms: u64) -> Self {
         Self {
@@ -160,6 +171,17 @@ mod tests {
     fn zero_backoff_disables_cache() {
         let cache = DeniedFlowCache::new(0);
         assert_eq!(cache.remember_denial(7, &tuple(40_000, 443)), None);
+    }
+
+    #[test]
+    fn active_count_excludes_expired_flows_without_traffic() {
+        let cache = DeniedFlowCache::new(500);
+        let now = Instant::now();
+        cache.remember_for_at(7, &tuple(40000, 443), Duration::from_millis(500), now);
+        cache.remember_for_at(8, &tuple(40000, 443), Duration::from_millis(1000), now);
+        assert_eq!(cache.active_count_at(now), 2);
+        assert_eq!(cache.active_count_at(now + Duration::from_millis(500)), 1);
+        assert_eq!(cache.active_count_at(now + Duration::from_millis(1000)), 0);
     }
 
     #[test]

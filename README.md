@@ -47,6 +47,23 @@ To run the ZPRnet you need at least:
 
 ## How to setup a ZPRnet
 
+### Node denial telemetry
+
+The management RPC `counters` response includes `Buffered Denials`, a gauge of
+unexpired negative-decision cache entries. Reading it prunes expired entries even
+when there is no new traffic. `Visa Request Backoff Denied` counts requests
+denied locally by that cache, separately from denials returned by Visa Service.
+Management counter reset/restart resets the local-denial count; it does not
+clear the buffered-denial gauge. CLI `watch` displays the gauge's current value,
+not a delta, so cache expiry cannot underflow its display.
+
+The Control-Service operator exporter
+`zpr-dashboard/scripts/node-denial-metrics.sh` in the `zpr-visaservice` repository
+reads the node management socket through `ph-cli` and emits OTLP JSON. Export
+`Buffered Denials` as `zpr.node.denials.buffered` and the local-denial counter as
+`zpr.node.denials.local` with the configured node resource identity. These are
+node observations, not estimates from Visa Service denial history.
+
 A minimal ZPRnet has a node and a visa service. You will probably also
 want a service or two that run on the net, plus some client adapters
 that connect in and access the services.
@@ -432,4 +449,3 @@ visa-service traffic is not routed to it.
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in ZPR by you, shall be licensed as Apache 2.0, without any additional
 terms or conditions.
-
