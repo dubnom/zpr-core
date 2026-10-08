@@ -17,6 +17,8 @@ or UI.
 - macOS has a native `utun` implementation in `adapter/ph/src/sys/macos`, but
   it is not in the adapter CI matrix. It currently supports one TUN queue and
   IPv6 address management only; named interfaces must use the `utunN` form.
+  Native Apple Silicon compilation/unit validation now passes locally; see
+  the October 7 progress below. This is not connected-adapter certification.
 - Windows has no `ph` system/TUN backend.
 - Android and iOS have no `ph` platform integration. Android-specific packet
   steering conditionals are not, by themselves, a working Android adapter.
@@ -69,6 +71,28 @@ under the existing `ph` implementation.
   and error behavior can be tested without privileged TUN access.
 
 ### 2. Stabilize macOS
+
+**Local progress, 2026-10-07:** `cargo test --locked -p ph` passes natively on
+Apple Silicon: 246 library and 267 binary tests, with one ignored test in each
+runner. `cargo build --locked -p ph --bin ph` and `ph adapter --help` also pass.
+No utun device, route, DNS setting or live organization was changed.
+
+Six new unprivileged Mac tests exercise name/unit bounds, pre-kernel prefix/MTU
+rejection, IPv6 masks, global/scoped address recognition, prefix bounds and
+unsupported queues. The backend now checks socket failure before creating an
+owned descriptor, prevents interface-unit overflow, validates configuration
+before tunnel creation and recognizes IPv6 addresses without requiring a scope
+suffix. Address addition/removal is serialized.
+
+The separate enrollment project now provides an Apple Silicon per-user
+Keychain-backed development wizard/app/DMG. It neither installs this runtime
+nor issues its credentials. Secure enrollment-to-runtime handoff remains
+unfinished; do not bridge it by exporting the user's Keychain key to a root
+service. See the [Mac enrollment guide](../zpr-visaservice/zpr-dashboard/README.md#mac-enrollment-app-and-adapter-validation-development).
+
+Strict Clippy remains blocked by existing `libnode2` lints and an existing
+capture-worker unhandled partial-write lint, outside this increment. Build/unit
+success is not a claim that lint, privileged packet flow or lifecycle gates pass.
 
 - Add macOS CI for compilation, unit tests, and a permission-gated utun smoke
   test; distinguish simulator/build checks from real packet-flow tests.

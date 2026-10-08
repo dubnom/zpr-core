@@ -6,6 +6,10 @@ We are currently working towards Milestone 6.
 - See the [roadmap](https://github.com/orgs/org-zpr/projects/3/views/8).
 - See the [adapter platform support plan](ADAPTER_PLATFORM_SUPPORT_PLAN.md) for
   the current Linux/macOS baseline and proposed Windows, Android, and iOS work.
+- Mac Apple Silicon adapter build/unit validation and tunnel-boundary fixes are
+  now recorded in that plan. The separate [Mac enrollment app](../zpr-visaservice/zpr-dashboard/README.md#mac-enrollment-app-and-adapter-validation-development)
+  uses per-user Keychain storage but does not install/connect this adapter.
+  Privileged tunnel/traffic certification and credential handoff remain pending.
 
 
 

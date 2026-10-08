@@ -66,6 +66,7 @@ impl ZprTun {
     }
 
     pub fn add_address(&self, addr: IpAddr, prefix_len: u8) -> std::io::Result<()> {
+        validate_prefix(prefix_len)?;
         let mtx = self
             .mtx
             .lock()
@@ -107,6 +108,11 @@ impl ZprTun {
     }
 
     pub fn clear_address(&self, addr: IpAddr, prefix_len: u8) -> std::io::Result<()> {
+        validate_prefix(prefix_len)?;
+        let _lock = self
+            .mtx
+            .lock()
+            .map_err(|_| std::io::Error::other("Mutex lock failed"))?;
         if !self.has_address(addr)? {
             return Ok(());
         }
@@ -169,14 +175,66 @@ impl ZprTun {
                 ),
             ));
         }
-        // Just look for the pattern "inet6 <addr>" + "%" in the output.
         let out_str = String::from_utf8_lossy(&output.stdout);
-        Ok(out_str.contains(&format!("inet6 {}%", addr)))
+        Ok(ifconfig_has_address(&out_str, addr))
     }
+}
+
+fn validate_prefix(prefix_len: u8) -> std::io::Result<()> {
+    if prefix_len > 128 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "IPv6 prefix length must be between 0 and 128",
+        ));
+    }
+    Ok(())
+}
+
+fn ifconfig_has_address(output: &str, address: IpAddr) -> bool {
+    output.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        fields.next() == Some("inet6")
+            && fields
+                .next()
+                .and_then(|value| value.split('%').next())
+                .and_then(|value| value.parse::<IpAddr>().ok())
+                == Some(address)
+    })
 }
 
 impl AsFd for ZprTun {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.inner.as_fd()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_global_and_scoped_ipv6_addresses_exactly() {
+        let output =
+            "utun2: flags=8051\n\tinet6 fe80::1%utun2 prefixlen 64\n\tinet6 fd00::1 prefixlen 64\n";
+        assert!(ifconfig_has_address(output, "fe80::1".parse().unwrap()));
+        assert!(ifconfig_has_address(output, "fd00::1".parse().unwrap()));
+        assert!(!ifconfig_has_address(output, "fd00::10".parse().unwrap()));
+        assert!(!ifconfig_has_address(output, "127.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn unsupported_queue_counts_fail_without_kernel_access() {
+        for count in [0, 2, 8] {
+            assert!(ZprTun::new_mq(None, count, Some("fd00::1".parse().unwrap())).is_err());
+        }
+        assert!(ZprTun::new_mq(None, 1, None).is_err());
+    }
+
+    #[test]
+    fn prefix_lengths_are_bounded() {
+        assert!(validate_prefix(0).is_ok());
+        assert!(validate_prefix(128).is_ok());
+        assert!(validate_prefix(129).is_err());
+        assert!(validate_prefix(255).is_err());
     }
 }

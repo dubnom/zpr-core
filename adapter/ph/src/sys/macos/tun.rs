@@ -107,22 +107,14 @@ impl Tun {
 
     /// Create and configure the TUN device.
     pub fn create(config: &Builder) -> Result<Self, TunError> {
-        // The id is one plus the number after the "utun" prefix.
-        // If we pass the kernel id=0 it will assign the next available id.
-        let id = if let Some(tun_name) = config.name.as_ref() {
-            if tun_name.len() > IFNAMSIZ {
-                return Err(TunError::NameTooLong);
-            }
-            if !tun_name.starts_with("utun") {
-                return Err(TunError::InvalidName);
-            }
-            tun_name[4..].parse::<u32>()? + 1_u32
-        } else {
-            0_u32
-        };
+        let id = config.validate()?;
 
         let mut tundev = unsafe {
-            let fd = OwnedFd::from_raw_fd(libc::socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL));
+            let raw_fd = libc::socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL);
+            if raw_fd < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            let fd = OwnedFd::from_raw_fd(raw_fd);
             let mut info = ctl_info {
                 ctl_id: 0,
                 ctl_name: {
@@ -273,6 +265,7 @@ impl Tun {
     }
 
     fn set_address_ipv6(&mut self, value: Ipv6Addr, prefix_len: usize) -> Result<(), TunError> {
+        let prefix_mask = ipv6_prefix_mask(prefix_len)?;
         let mut req: in6_aliasreq = unsafe { mem::zeroed() };
         unsafe {
             ptr::copy_nonoverlapping(
@@ -286,11 +279,7 @@ impl Tun {
             req.ifra_prefixmask.sin6_family = AF_INET6 as libc::sa_family_t;
             req.ifra_prefixmask.sin6_len = mem::size_of::<sockaddr_in6>() as u8;
 
-            let mut pfx_mask: u128 = 0;
-            for i in 0..prefix_len {
-                pfx_mask |= 1 << (127 - i);
-            }
-            req.ifra_prefixmask.sin6_addr.s6_addr = pfx_mask.to_be_bytes();
+            req.ifra_prefixmask.sin6_addr.s6_addr = prefix_mask;
 
             req.ifra_lifetime.ia6t_vltime = ND6_INFINITE_LIFETIME;
             req.ifra_lifetime.ia6t_pltime = ND6_INFINITE_LIFETIME;
@@ -338,6 +327,21 @@ pub struct Builder {
 }
 
 impl Builder {
+    fn validate(&self) -> Result<u32, TunError> {
+        if self.prefix_len.is_some_and(|prefix| prefix > 128) {
+            return Err(TunError::InvalidPrefixLen);
+        }
+        if let Some(mtu) = self.mtu {
+            if self.is_ipv6() && mtu < IPV6_MMTU {
+                return Err(TunError::InvalidIpv6Mtu);
+            }
+            if !self.is_ipv6() && mtu < IPV4_MMTU {
+                return Err(TunError::InvalidIpv4Mtu);
+            }
+        }
+        tun_unit(self.name.as_deref())
+    }
+
     /// Create a new builder, which is used to configure the TUN device.
     /// You must choose either IPv4 or IPv6.
     fn new(ipv: IPV) -> Builder {
@@ -390,6 +394,35 @@ impl Builder {
     }
 }
 
+fn tun_unit(name: Option<&str>) -> Result<u32, TunError> {
+    let Some(name) = name else {
+        return Ok(0);
+    };
+    if name.len() >= IFNAMSIZ {
+        return Err(TunError::NameTooLong);
+    }
+    let suffix = name.strip_prefix("utun").ok_or(TunError::InvalidName)?;
+    if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(TunError::InvalidName);
+    }
+    suffix
+        .parse::<u32>()?
+        .checked_add(1)
+        .ok_or(TunError::InvalidName)
+}
+
+fn ipv6_prefix_mask(prefix_len: usize) -> Result<[u8; 16], TunError> {
+    if prefix_len > 128 {
+        return Err(TunError::InvalidPrefixLen);
+    }
+    let mask = if prefix_len == 0 {
+        0
+    } else {
+        u128::MAX << (128 - prefix_len)
+    };
+    Ok(mask.to_be_bytes())
+}
+
 /// Fill the `addr` with the address particulars. `size` is the size of the
 /// sockaddr structure to be filled (used as our upper bound for the copy).
 pub unsafe fn ipv4addr_to_sockaddr(
@@ -435,4 +468,67 @@ pub unsafe fn ipv6addr_to_sockaddr(
             size.min(std::mem::size_of::<sockaddr_in6>()),
         );
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interface_units_are_validated_without_creating_a_tunnel() {
+        assert_eq!(tun_unit(None).unwrap(), 0);
+        assert_eq!(tun_unit(Some("utun0")).unwrap(), 1);
+        assert_eq!(tun_unit(Some("utun12")).unwrap(), 13);
+        for name in [
+            "tun0",
+            "utun",
+            "utun-1",
+            "utun+1",
+            "utun1x",
+            "utun4294967295",
+        ] {
+            assert!(tun_unit(Some(name)).is_err(), "{name}");
+        }
+        assert!(matches!(
+            tun_unit(Some("utun123456789012")),
+            Err(TunError::NameTooLong)
+        ));
+    }
+
+    #[test]
+    fn invalid_configuration_fails_before_kernel_tunnel_creation() {
+        let mut builder = Tun::builder(IPV::V6);
+        builder.with_prefix_len(129);
+        assert!(matches!(
+            Tun::create(&builder),
+            Err(TunError::InvalidPrefixLen)
+        ));
+        builder.with_prefix_len(128).with_mtu(1279);
+        assert!(matches!(
+            Tun::create(&builder),
+            Err(TunError::InvalidIpv6Mtu)
+        ));
+        let mut builder = Tun::builder(IPV::V4);
+        builder.with_mtu(575);
+        assert!(matches!(
+            Tun::create(&builder),
+            Err(TunError::InvalidIpv4Mtu)
+        ));
+    }
+
+    #[test]
+    fn ipv6_prefix_masks_cover_zero_full_and_invalid_lengths() {
+        assert_eq!(ipv6_prefix_mask(0).unwrap(), [0; 16]);
+        assert_eq!(ipv6_prefix_mask(128).unwrap(), [255; 16]);
+        assert_eq!(
+            ipv6_prefix_mask(64).unwrap(),
+            [
+                255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0
+            ]
+        );
+        assert!(matches!(
+            ipv6_prefix_mask(129),
+            Err(TunError::InvalidPrefixLen)
+        ));
+    }
 }
