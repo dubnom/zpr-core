@@ -237,4 +237,166 @@ mod tests {
         assert!(validate_prefix(129).is_err());
         assert!(validate_prefix(255).is_err());
     }
+
+    #[test]
+    #[ignore = "requires explicit ZPR_MACOS_UTUN_SMOKE=1 and administrator authorization"]
+    fn privileged_utun_lifecycle_smoke() {
+        assert_eq!(
+            std::env::var("ZPR_MACOS_UTUN_SMOKE").as_deref(),
+            Ok("1"),
+            "use the explicit macOS smoke-test runner"
+        );
+        assert_eq!(
+            unsafe { libc::geteuid() },
+            0,
+            "administrator rights required"
+        );
+        for _ in 0..2 {
+            smoke_cycle().expect("isolated utun lifecycle failed");
+        }
+    }
+
+    fn smoke_cycle() -> Result<(), Box<dyn std::error::Error>> {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        fn require(condition: bool, message: &str) -> std::io::Result<()> {
+            if condition {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(message))
+            }
+        }
+
+        fn require_single_host_alias(name: &str, address: IpAddr) -> std::io::Result<()> {
+            let output = Command::new(COMMAND_IFCONFIG).arg(name).output()?;
+            require(output.status.success(), "cannot inspect IPv6 alias prefix")?;
+            let text = String::from_utf8_lossy(&output.stdout);
+            let lines: Vec<_> = text
+                .lines()
+                .filter(|line| ifconfig_has_address(line, address))
+                .collect();
+            require(lines.len() == 1, "IPv6 alias missing or duplicated")?;
+            let fields: Vec<_> = lines[0].split_whitespace().collect();
+            require(
+                fields.windows(2).any(|pair| pair == ["prefixlen", "128"]),
+                "test IPv6 alias must have exactly a /128 prefix",
+            )
+        }
+
+        fn require_mtu(name: &str, mtu: u16) -> std::io::Result<()> {
+            let output = Command::new(COMMAND_IFCONFIG).arg(name).output()?;
+            require(
+                output.status.success(),
+                "temporary interface cannot be inspected",
+            )?;
+            let text = String::from_utf8_lossy(&output.stdout);
+            require(
+                text.lines()
+                    .next()
+                    .is_some_and(|line| line.ends_with(&format!("mtu {mtu}"))),
+                "MTU differs from requested value",
+            )
+        }
+
+        let before = Command::new(COMMAND_IFCONFIG).arg("-l").output()?;
+        require(
+            before.status.success(),
+            "could not snapshot existing interfaces",
+        )?;
+        let interfaces = String::from_utf8(before.stdout)?;
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64;
+        let first = IpAddr::V6(std::net::Ipv6Addr::new(
+            0xfd97,
+            (nonce >> 48) as u16,
+            (nonce >> 32) as u16,
+            (nonce >> 16) as u16,
+            nonce as u16,
+            0,
+            0,
+            1,
+        ));
+        let mut second = match first {
+            IpAddr::V6(value) => value.segments(),
+            _ => unreachable!(),
+        };
+        second[7] = 2;
+        let second = IpAddr::V6(second.into());
+        let all = Command::new(COMMAND_IFCONFIG).output()?;
+        require(
+            all.status.success(),
+            "could not check test-address conflicts",
+        )?;
+        let all = String::from_utf8(all.stdout)?;
+        require(
+            !ifconfig_has_address(&all, first) && !ifconfig_has_address(&all, second),
+            "test addresses already exist; no interface was created",
+        )?;
+
+        let mut builder = tun::Tun::builder(tun::IPV::V6);
+        builder
+            .with_address(first)
+            .with_prefix_len(128)
+            .with_mtu(1400);
+        let mut device = ZprTun::new(tun::Tun::create(&builder)?);
+        let name = device.name().to_owned();
+        let result = (|| -> std::io::Result<()> {
+            require(
+                name.starts_with("utun") && !interfaces.split_whitespace().any(|old| old == name),
+                "kernel did not assign a fresh temporary interface",
+            )?;
+            require_mtu(&name, 1400)?;
+            device
+                .inner
+                .set_mtu(1280)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            require_mtu(&name, 1280)?;
+            require(
+                device.has_address(first)?,
+                "ioctl-configured IPv6 /128 is absent",
+            )?;
+            require_single_host_alias(&name, first)?;
+            device.add_address(second, 128)?;
+            device.add_address(second, 128)?;
+            require(device.has_address(second)?, "added IPv6 /128 is absent")?;
+            require_single_host_alias(&name, second)?;
+            device.clear_address(second, 128)?;
+            device.clear_address(second, 128)?;
+            require(
+                !device.has_address(second)?,
+                "removed alias remains present",
+            )?;
+            device.clear_address(first, 128)?;
+            require(
+                !device.has_address(first)?,
+                "initial IPv6 address remains present",
+            )?;
+            Ok(())
+        })();
+        // Always close both kernel descriptors before reporting a lifecycle failure.
+        drop(device);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let after = Command::new(COMMAND_IFCONFIG).arg("-l").output()?;
+            require(
+                after.status.success(),
+                "could not verify interface teardown",
+            )?;
+            if !String::from_utf8_lossy(&after.stdout)
+                .split_whitespace()
+                .any(|interface| interface == name)
+            {
+                break;
+            }
+            require(
+                std::time::Instant::now() < deadline,
+                "temporary utun remains after descriptor close",
+            )?;
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        result?;
+        println!(
+            "{name}: MTU 1400 then 1280, two IPv6 /128 addresses, idempotent alias lifecycle and descriptor-close teardown passed"
+        );
+        Ok(())
+    }
 }

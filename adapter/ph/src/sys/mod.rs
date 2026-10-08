@@ -12,6 +12,15 @@ pub use self::macos::TunPiImpl;
 #[cfg(target_os = "macos")]
 pub use self::macos::ZprTun;
 
+#[cfg(target_os = "ios")]
+pub(crate) mod ios;
+#[cfg(target_os = "ios")]
+pub use self::ios::TunPiImpl;
+#[cfg(target_os = "ios")]
+pub use self::ios::ZprTun;
+
+#[cfg(any(target_os = "ios", test))]
+pub(crate) mod packet_fd;
 pub(crate) mod posix;
 pub use self::posix::notify;
 

@@ -9,7 +9,12 @@ We are currently working towards Milestone 6.
 - Mac Apple Silicon adapter build/unit validation and tunnel-boundary fixes are
   now recorded in that plan. The separate [Mac enrollment app](../zpr-visaservice/zpr-dashboard/README.md#mac-enrollment-app-and-adapter-validation-development)
   uses per-user Keychain storage but does not install/connect this adapter.
-  Privileged tunnel/traffic certification and credential handoff remain pending.
+  Full traffic certification and credential handoff remain pending.
+- An explicitly authorized [Mac utun lifecycle smoke](integration-test/macos-utun-smoke.sh)
+  now passes on Apple Silicon, including MTU/IPv6 aliases and repeated teardown.
+  It leaves existing interfaces/default routes/DNS unchanged and is not a
+  connected-adapter or packet-flow certification. See the platform plan for
+  the opt-in runner and remaining gates.
 
 
 

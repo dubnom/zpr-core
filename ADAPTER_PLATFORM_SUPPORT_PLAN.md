@@ -94,6 +94,31 @@ Strict Clippy remains blocked by existing `libnode2` lints and an existing
 capture-worker unhandled partial-write lint, outside this increment. Build/unit
 success is not a claim that lint, privileged packet flow or lifecycle gates pass.
 
+**Privileged local smoke:** explicitly administrator-approved native
+utun create/configure/close now passes on this Apple Silicon host. The opt-in
+[runner](integration-test/macos-utun-smoke.sh) builds as the ordinary desktop user
+and elevates only the exact ignored library test. It uses a kernel-assigned fresh
+interface, random per-run ULA host aliases (/128), MTU 1400 then 1280, duplicate add/removal
+checks and two teardown/recreation cycles. Descriptor close removes the interface
+even before a lifecycle error is reported. Existing interfaces, IPv4/IPv6 default
+routes and DNS snapshots match before/after. No default route or DNS is configured,
+no existing interface is named/modified, and no ZPR credentials/traffic are used.
+
+Run deliberately on a Mac with administrator authorization:
+
+```sh
+sh integration-test/macos-utun-smoke.sh --allow-temporary-utun
+```
+
+The test is ignored by ordinary Cargo runs and additionally requires
+`ZPR_MACOS_UTUN_SMOKE=1` plus root. Cargo never runs elevated. The runner uses
+cached sudo authorization or the macOS administrator dialog, and reports failure
+if host snapshots differ rather than attempting automatic network repair.
+Ordinary `cargo test --locked -p ph` now has 246 library / 267 binary passing
+tests and **two ignored tests in each runner**. This smoke establishes native
+interface/address/MTU teardown only—not packet forwarding, full route rollback,
+DNS lifecycle, sleep/wake, production identity admission or credential handoff.
+
 - Add macOS CI for compilation, unit tests, and a permission-gated utun smoke
   test; distinguish simulator/build checks from real packet-flow tests.
 - Test IPv6 address lifecycle, route setup, MTU, sleep/wake, adapter shutdown,
