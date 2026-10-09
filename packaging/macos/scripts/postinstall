@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+label=com.zpr.ph.adapter
+plist=/Library/LaunchDaemons/$label.plist
+config='/Library/Application Support/ZPR/Adapter/adapter.toml'
+run_dir='/Library/Application Support/ZPR/Adapter/run'
+
+/bin/mkdir -p "$run_dir" /var/log/zpr
+/usr/sbin/chown root:wheel "$run_dir" /var/log/zpr
+/bin/chmod 0700 "$run_dir"
+/bin/chmod 0750 /var/log/zpr
+/usr/sbin/chown root:wheel "$plist"
+/bin/chmod 0644 "$plist"
+/usr/bin/plutil -lint "$plist" >/dev/null
+/bin/launchctl bootout system "$plist" >/dev/null 2>&1 || true
+
+if [ ! -e "$config" ]; then
+    /bin/launchctl disable "system/$label"
+    echo "Adapter installed but not started. An administrator must provision $config and runtime credentials." >&2
+    exit 0
+fi
+if [ -L "$config" ] || [ ! -f "$config" ] || [ "$(/usr/bin/stat -f '%u' "$config")" != 0 ] || [ "$(/usr/bin/stat -f '%Lp' "$config")" != 600 ]; then
+    echo "refusing to start: $config must be a regular root-owned mode-0600 file" >&2
+    exit 1
+fi
+
+/bin/launchctl enable "system/$label"
+/bin/launchctl bootstrap system "$plist"

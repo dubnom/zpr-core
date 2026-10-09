@@ -7,9 +7,12 @@ We are currently working towards Milestone 6.
 - See the [adapter platform support plan](ADAPTER_PLATFORM_SUPPORT_PLAN.md) for
   the current Linux/macOS baseline and proposed Windows, Android, and iOS work.
 - Mac Apple Silicon adapter build/unit validation and tunnel-boundary fixes are
-  now recorded in that plan. The separate [Mac enrollment app](../zpr-visaservice/zpr-dashboard/README.md#mac-enrollment-app-and-adapter-validation-development)
-  uses per-user Keychain storage but does not install/connect this adapter.
-  Full traffic certification and credential handoff remain pending.
+  recorded in that plan. `packaging/macos` now builds a development package for
+  a root LaunchDaemon, but it requires an administrator-provisioned adapter
+  profile and credentials. It is not signed/notarized for distribution, and
+  secure enrollment-to-runtime credential issuance/handoff and live traffic
+  certification remain pending. The separate [Mac enrollment app](../zpr-visaservice/zpr-dashboard/README.md#mac-enrollment-app-and-adapter-validation-development)
+  keeps its identity in the user's Keychain and does not export it to the daemon.
 - An explicitly authorized [Mac utun lifecycle smoke](integration-test/macos-utun-smoke.sh)
   now passes on Apple Silicon, including MTU/IPv6 aliases and repeated teardown.
   It leaves existing interfaces/default routes/DNS unchanged and is not a

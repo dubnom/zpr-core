@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+[ "$(uname -s)" = Darwin ] || { echo "ZPR Adapter package requires macOS" >&2; exit 1; }
+[ "$(uname -m)" = arm64 ] || { echo "this development package supports Apple Silicon only" >&2; exit 1; }
+major=$(/usr/bin/sw_vers -productVersion | /usr/bin/awk -F. '{print $1}')
+[ "$major" -ge 13 ] || { echo "ZPR Adapter package requires macOS 13 or later" >&2; exit 1; }

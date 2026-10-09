@@ -119,6 +119,17 @@ tests and **two ignored tests in each runner**. This smoke establishes native
 interface/address/MTU teardown only—not packet forwarding, full route rollback,
 DNS lifecycle, sleep/wake, production identity admission or credential handoff.
 
+**Development install package, 2026-10-09:** `packaging/macos/build-adapter-pkg.sh`
+builds an Apple Silicon package containing native `ph`/`ph-cli` binaries and a
+root LaunchDaemon. It requires a separately provisioned, root-owned mode-0600
+adapter profile; absent or unsafe configuration leaves the service disabled.
+The package does not create identities, issue credentials, copy the user's
+Keychain key, install during this task, or change routes/DNS. The explicit
+unsigned-development option is not suitable for distribution. Credential
+issuance/handoff, Developer ID signing/notarization, route/sleep lifecycle and
+real ZPR packet-flow validation remain release gates; see
+[`packaging/macos/README.md`](packaging/macos/README.md).
+
 - Add macOS CI for compilation, unit tests, and a permission-gated utun smoke
   test; distinguish simulator/build checks from real packet-flow tests.
 - Test IPv6 address lifecycle, route setup, MTU, sleep/wake, adapter shutdown,

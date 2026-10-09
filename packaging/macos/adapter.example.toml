@@ -1,0 +1,13 @@
+[global]
+control_path = "/Library/Application Support/ZPR/Adapter/run/control.sock"
+capture_path = "/Library/Application Support/ZPR/Adapter/run/capture.sock"
+ca_file = "/Library/Application Support/ZPR/Adapter/auth-ca.crt"
+certificate_file = "/Library/Application Support/ZPR/Adapter/adapter-noise.crt"
+private_key_file = "/Library/Application Support/ZPR/Adapter/adapter-noise.key"
+# Leave tun_if and zpr_addr unset. PH creates a fresh utun and requests its ZPR address.
+
+[adapter]
+# Set the identity and node endpoint issued/configured by the ZPR administrator.
+name = "replace-with-authorized-adapter-cn"
+node_addr = "192.0.2.1:5000"
+bootstrap_key = "/Library/Application Support/ZPR/Adapter/adapter-bootstrap.key"

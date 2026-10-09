@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.zpr.ph.adapter</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Library/Application Support/ZPR/Adapter/bin/ph</string>
+		<string>adapter</string>
+		<string>--config-file</string>
+		<string>/Library/Application Support/ZPR/Adapter/adapter.toml</string>
+	</array>
+	<key>UserName</key>
+	<string>root</string>
+	<key>GroupName</key>
+	<string>wheel</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>Umask</key>
+	<integer>63</integer>
+	<key>StandardOutPath</key>
+	<string>/var/log/zpr/ph-adapter.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/zpr/ph-adapter.log</string>
+</dict>
+</plist>
