@@ -10,4 +10,9 @@ private_key_file = "/Library/Application Support/ZPR/Adapter/adapter-noise.key"
 # Set the identity and node endpoint issued/configured by the ZPR administrator.
 name = "replace-with-authorized-adapter-cn"
 node_addr = "192.0.2.1:5000"
-bootstrap_key = "/Library/Application Support/ZPR/Adapter/adapter-bootstrap.key"
+
+[authentication]
+# This is a separate runtime key. Never copy the user-level enrollment key here.
+bas_key = "/Library/Application Support/ZPR/Adapter/adapter-auth.key"
+# Must issue an HTTPS server certificate with DNS SAN auth.zpr.
+tls_ca_file = "/Library/Application Support/ZPR/Adapter/auth-service-ca.crt"

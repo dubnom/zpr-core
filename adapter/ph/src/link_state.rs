@@ -1446,7 +1446,6 @@ impl LinkStateWrapper {
         }
         let service_addr = asa_addrs[0];
 
-        let tls_cert = pki::from_pem(auth::HARD_CODED_BAS_TLS_CERT_PEM.as_bytes()).unwrap();
         let task_asm = asm.clone();
 
         tokio::task::spawn_local(async move {
@@ -1460,7 +1459,7 @@ impl LinkStateWrapper {
                 }
                 return;
             };
-            let event = match rsauth.authenticate(service_addr, aaa_addr, tls_cert).await {
+            let event = match rsauth.authenticate(service_addr, aaa_addr).await {
                 Ok(blob) => LinkEvent::AuthenticationSuccess(blob),
                 Err(e) => {
                     error!(target: LINK_STATE, "{}: failed to authenticate with auth service: {e:?}", task_asm.formatted_link_id(link_id));

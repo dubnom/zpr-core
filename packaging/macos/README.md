@@ -24,11 +24,12 @@ Do not distribute an unsigned development package or bypass Gatekeeper.
 Before enabling the service, an administrator must create
 `/Library/Application Support/ZPR/Adapter/adapter.toml` with mode `0600`,
 owned by `root:wheel`, using `adapter.example.toml` as a field reference. The
-CA, adapter Noise certificate/private key, and bootstrap key referenced by the
-profile must also be provisioned as root-owned files with restrictive modes.
-Use a device-specific identity approved for the intended organization. The
-development enrollment Keychain key is not the adapter runtime credential and
-must not be exported or copied to this root service.
+CA, adapter Noise certificate/private key, BAS runtime key, and BAS TLS CA
+referenced by the profile must also be provisioned as root-owned files with
+restrictive modes. The BAS endpoint must present a certificate valid for the
+`auth.zpr` DNS name and chain to `authentication.tls_ca_file`. The configured
+BAS runtime key is distinct from the development enrollment Keychain key; the
+enrollment private key must never be exported or copied to this root service.
 
 Leave `tun_if` and `zpr_addr` unset so macOS assigns a fresh `utun` interface
 and PH can use the address granted by Visa Service. The adapter currently

@@ -64,8 +64,10 @@ tokio-tun = { version = "0.11.5" }
 
 [dev-dependencies]
 futures = "0.3.31"
+rcgen = "0.14.7"
 serial_test = "4.0"
 tokio = { workspace = true, features = ["test-util"] }
+tokio-rustls = "0.26.4"
 
 [features]
 default = ["io-uring", "rcu-crossbeam-epoch"]

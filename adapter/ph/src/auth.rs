@@ -40,40 +40,7 @@ pub const BLOB_TYPE_AC: &str = "AC";
 /// be no older than this.
 pub const MAX_BLOB_AGE_SECONDS: u64 = 120; // 2 minutes
 
-// TODO: Not sure how we get these out or if we need them.
-pub const HARD_CODED_BAS_TLS_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
-MIIFmzCCA4OgAwIBAgIUJSg4OHOfPqY+lD7ymZy6akX/ZZ8wDQYJKoZIhvcNAQEL
-BQAwXTELMAkGA1UEBhMCVVMxCzAJBgNVBAgMAktZMRMwEQYDVQQHDApMb3Vpc3Zp
-bGxlMQswCQYDVQQKDAJBSTEMMAoGA1UECwwDWlBSMREwDwYDVQQDDAhhdXRoLnpw
-cjAeFw0yNTA0MTYxOTQ4MjRaFw0yNjA0MTYxOTQ4MjRaMF0xCzAJBgNVBAYTAlVT
-MQswCQYDVQQIDAJLWTETMBEGA1UEBwwKTG91aXN2aWxsZTELMAkGA1UECgwCQUkx
-DDAKBgNVBAsMA1pQUjERMA8GA1UEAwwIYXV0aC56cHIwggIiMA0GCSqGSIb3DQEB
-AQUAA4ICDwAwggIKAoICAQDl6DwVoQJsWAOTK4JWZYp3YL7b647ypIadVioKaGAk
-1Fk4FwogcZG/tBqsxCCW+pv7FXfjbwp6ChrxUGaTZUGzF5ft5L7q4oqSKOHvL1i9
-DiyU3xwk/biMiPTyuB8YYIiwQDiHAtYncJVMGMJPefDTl8OPNsjGQyJI+xuoBP/n
-PhbNIgn6E8YxrNl0/u+xWHjM6iOe5bZhXH1nkJQ+hviTxAtRDfayGM0nXrkEzdkC
-Aav95Kgp91cIa2lgoPpHm+HwQANp8jEPvsTVFMbwlPuFx9nopyXLzAdkgv9Z3+S3
-W9ISFWdaAQ4TJDrWfAQyPgPy8UPLOzoK/TC9qbRx2QLQaY3v6+hurnWUm0cHAZ5n
-zs8KflWXfRR+DA3Vc4aDF5vhT0IBDxs5rGu3/gtlJKwfwzMGDtprtuAXpXyZ48yM
-f17WymXsamWDIN58cHjPWgLYoUsr87HtRFGVmlqvCBzaQf4zGCOoW5LWSlkzD2da
-6ak3xBbogGExSk7RAhi9XLCl0LKfjTRsEGuAKpbGvt4h8i2Bq5YLmrzrqzI5XDYt
-u3W1hWwSwwAzK6SHvYLyOMTI75UMy9Zsh4VoUJUNkYm4XgO0WFaA9bs5Cq73d1zY
-i70s8jccheYhoAVXOWLDBQxCu2beHR7tkNXwyZ/RBhL/4/tyc+FKzF6C9sE9f6hv
-EQIDAQABo1MwUTAdBgNVHQ4EFgQU+bscgkfPxWQLdX4AypBqXnzmvxwwHwYDVR0j
-BBgwFoAU+bscgkfPxWQLdX4AypBqXnzmvxwwDwYDVR0TAQH/BAUwAwEB/zANBgkq
-hkiG9w0BAQsFAAOCAgEASZvKIbzeXKd1WuMmZT7kCywYqmWfgo7O51VNWni3FLdQ
-5De44BGIOVUFn+0vC0xQQbQ4iM9yTMb27AQJGm9Aor92w9G7LvR6Mp5py16eJb+F
-MSMZwN7PqK/QdnbIwiUGplDkKndd1dA/ZcHg5oJdE1areX0Zw8ZZ5yZoO12xnhc4
-AK2Mop897EGSYHyrxidYbocPj5Bn7m3mVC7U2quh1HwnZzbWfpx9g8Ry4T8kUco3
-dwZa2RHWhy2yrky2t3pg5tqaw79f/pXoTkcxvRSwZU3EcY23rq5OYQc7SLBIMm/a
-n8ZSJIduRRTLNE7T6Y7o43jDU8u+tcfB5ZE9ytuJA/NgtIYeEiNHMRepYNI2pffj
-MGELMS4xR3NIEyA6ZGVRBnI4dDr/3AmliOKKSt77iueSYCaPDBaxbbwcvEBBJtB0
-TPzKFsY5IH5ve5pZu7IhHIbE/yrAicbNtfX487WQTZfY+Qo8bf+XbdQIcRzkD+Q4
-VAvgJld9s5RI6x8CocU/PQvtQcWPFj//SbnnaMv2TTMLYgP+XWFwD1K1WQFpx2PK
-YM6AGtFc6p9klbags4r80QK+yEwYiBaNjDKmiNfQ1J38HCmd9lnMbzt9p7T838fP
-FiCJxns37RAqhGyryo9L0cryIEPwerjtNoLxmg94rfdovRmY+pm+HokRbD4Vycw=
------END CERTIFICATE-----
-"#;
+const BAS_TLS_HOST: &str = "auth.zpr";
 
 /// This is the data payload in a [zdp::PacketType::InitAuthenticationRequest] packet.
 #[derive(Clone, FromBytes, IntoBytes, Immutable, KnownLayout, Unaligned, Default)]
@@ -189,6 +156,7 @@ pub struct RsaBootstrapAuth {
 pub struct OAuthRsa {
     client_id: String,
     private_key: Arc<RsaKeyPair>,
+    tls_ca: Certificate,
 }
 
 impl ZdpAuthCodeBlob {
@@ -391,6 +359,7 @@ impl RsaBootstrapAuth {
 /// Response json object to initial auth request from an actor
 /// from a zpr-oauthrsa authentication service.
 #[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
 struct PreauthResp {
     nonce: String,
 }
@@ -432,10 +401,11 @@ impl OAuthRsa {
     /// Create a new OAuthRsa object.
     /// - `client_id` is the adapter CN
     /// - `private_key` is the RSA private key used to sign the nonce
-    pub fn new(client_id: &str, private_key: Arc<RsaKeyPair>) -> Self {
+    pub fn new(client_id: &str, private_key: Arc<RsaKeyPair>, tls_ca: Certificate) -> Self {
         OAuthRsa {
             client_id: client_id.to_string(),
             private_key,
+            tls_ca,
         }
     }
 
@@ -447,20 +417,13 @@ impl OAuthRsa {
         &self,
         service_addr: SocketAddr,
         local_addr: std::net::IpAddr,
-        tls_cert: X509Certificate,
     ) -> Result<ZdpAuthCodeBlob, AuthError> {
-        let der = pki::to_der(&tls_cert)
-            .map_err(|e| AuthError::FormatError(format!("cannot encode TLS certificate: {e}")))?;
-        let tls_cert = Certificate::from_der(&der).unwrap();
-
-        let nonce_buf = self
-            .preauthorize(service_addr, local_addr, &tls_cert)
-            .await?;
+        let nonce_buf = self.preauthorize(service_addr, local_addr).await?;
 
         let signature = sign_rsa_key(&self.private_key, &nonce_buf);
 
         let auth_code = self
-            .authorize(service_addr, local_addr, &tls_cert, &nonce_buf, &signature)
+            .authorize(service_addr, local_addr, &nonce_buf, &signature)
             .await?;
 
         Ok(ZdpAuthCodeBlob {
@@ -478,29 +441,34 @@ impl OAuthRsa {
         &self,
         service_addr: SocketAddr,
         local_addr: std::net::IpAddr,
-        tls_cert: &Certificate,
     ) -> Result<Vec<u8>, AuthError> {
         // See https://github.com/org-zpr/zpr-core/issues/861
-        let cb = reqwest::ClientBuilder::new()
-            .local_address(local_addr)
-            .add_root_certificate(tls_cert.clone())
-            .danger_accept_invalid_certs(true) // TODO: Figure this TLS stuff out and get rid of this
-            .timeout(std::time::Duration::from_secs(10));
-        let client = cb.build().unwrap();
-
+        let client = self.client(service_addr, local_addr)?;
         let resp = client
-            .get(format!("https://{}/preauthorize", service_addr))
+            .get(self.url(service_addr, "/preauthorize"))
             .query(&[("response_type", "code"), ("client_id", &self.client_id)])
             .send()
             .await
             .map_err(|e| AuthError::AuthError(format!("failed to send request: {}", e)))?;
 
+        if resp.status() != StatusCode::OK {
+            return Err(AuthError::AuthError(format!(
+                "preauthorize returned {}",
+                resp.status()
+            )));
+        }
         let pa_resp: PreauthResp = resp
             .json()
             .await
             .map_err(|e| AuthError::AuthError(format!("failed to parse response: {}", e)))?;
 
-        Ok(BASE64_STANDARD.decode(pa_resp.nonce.as_bytes())?)
+        let nonce = BASE64_STANDARD.decode(pa_resp.nonce.as_bytes())?;
+        if !(32..=256).contains(&nonce.len()) {
+            return Err(AuthError::FormatError(
+                "preauthorize nonce must contain 32 to 256 bytes".into(),
+            ));
+        }
+        Ok(nonce)
     }
 
     /// Call the authorize function on the authentication service.
@@ -509,7 +477,6 @@ impl OAuthRsa {
         &self,
         service_addr: SocketAddr,
         local_addr: std::net::IpAddr,
-        tls_cert: &Certificate,
         nonce: &[u8],
         payload: &[u8],
     ) -> Result<String, AuthError> {
@@ -520,16 +487,9 @@ impl OAuthRsa {
         };
 
         // Note client set to NOT follow redirects since that is how we get our response.
-        let cb = reqwest::ClientBuilder::new()
-            .local_address(local_addr)
-            .add_root_certificate(tls_cert.clone())
-            .danger_accept_invalid_certs(true) // TODO: Figure this TLS stuff out and get rid of this
-            .redirect(Policy::none())
-            .timeout(std::time::Duration::from_secs(10));
-        let client = cb.build().unwrap();
-
+        let client = self.client(service_addr, local_addr)?;
         let resp = client
-            .post(format!("https://{}/authorize", service_addr))
+            .post(self.url(service_addr, "/authorize"))
             .json(&authreq)
             .send()
             .await
@@ -544,35 +504,69 @@ impl OAuthRsa {
         }
 
         // Now extract the auth-code from the location header.
-        if let Some(loc) = resp.headers().get(header::LOCATION) {
-            if let Ok(loc_str) = loc.to_str() {
-                if loc_str.contains("error") {
-                    // TODO: We could parse this URL and get error & error_description
-                    return Err(AuthError::AuthError(format!(
-                        "failed to authorize: {}",
-                        loc_str
-                    )));
-                }
-                if let Some(code) = loc_str.split("code=").nth(1) {
-                    return Ok(code.to_string());
-                } else {
-                    return Err(AuthError::AuthError(format!(
-                        "failed to find code in location header: {}",
-                        loc_str
-                    )));
-                }
-            } else {
-                return Err(AuthError::AuthError(format!(
-                    "failed to parse location header: {}",
-                    loc.to_str().unwrap_or("invalid utf8")
-                )));
-            }
-        } else {
-            return Err(AuthError::AuthError(
-                "failed to find location header in response".to_string(),
-            ));
-        }
+        let location = resp.headers().get(header::LOCATION).ok_or_else(|| {
+            AuthError::AuthError("authorize response has no location header".into())
+        })?;
+        let location = location
+            .to_str()
+            .map_err(|_| AuthError::AuthError("authorize location header is invalid".into()))?;
+        parse_auth_code_location(location)
     }
+
+    fn client(
+        &self,
+        service_addr: SocketAddr,
+        local_addr: std::net::IpAddr,
+    ) -> Result<reqwest::Client, AuthError> {
+        reqwest::ClientBuilder::new()
+            .local_address(local_addr)
+            .add_root_certificate(self.tls_ca.clone())
+            .resolve_to_addrs(BAS_TLS_HOST, &[service_addr])
+            .redirect(Policy::none())
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| AuthError::AuthError(format!("failed to configure BAS HTTPS client: {e}")))
+    }
+
+    fn url(&self, service_addr: SocketAddr, path: &str) -> String {
+        format!("https://{BAS_TLS_HOST}:{}{path}", service_addr.port())
+    }
+}
+
+fn parse_auth_code_location(location: &str) -> Result<String, AuthError> {
+    let location = url::Url::parse(location)
+        .map_err(|_| AuthError::AuthError("authorize returned an invalid redirect URL".into()))?;
+    if location.scheme() != "https"
+        || location.host_str() != Some(BAS_TLS_HOST)
+        || location.port_or_known_default() != Some(443)
+        || location.path() != "/"
+        || location.username() != ""
+        || location.password().is_some()
+        || location.fragment().is_some()
+    {
+        return Err(AuthError::AuthError(
+            "authorize returned an untrusted redirect URL".into(),
+        ));
+    }
+    let mut pairs = location.query_pairs();
+    let Some((key, code)) = pairs.next() else {
+        return Err(AuthError::AuthError(
+            "authorize redirect contains no code".into(),
+        ));
+    };
+    if key != "code"
+        || code.is_empty()
+        || code.len() > 256
+        || !code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        || pairs.next().is_some()
+    {
+        return Err(AuthError::AuthError(
+            "authorize redirect contains an invalid code".into(),
+        ));
+    }
+    Ok(code.into_owned())
 }
 
 #[cfg(test)]
@@ -580,6 +574,75 @@ mod test {
     use super::*;
     use aws_lc_rs::signature::{KeyPair, RSA_PKCS1_2048_8192_SHA256, UnparsedPublicKey};
     use std::path::PathBuf;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio_rustls::TlsAcceptor;
+    use tokio_rustls::rustls::{
+        ServerConfig,
+        pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
+    };
+
+    fn test_tls_material(host: &str) -> (Certificate, Vec<u8>, PrivateKeyDer<'static>) {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let params = rcgen::CertificateParams::new(vec![host.into()]).unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        let der = cert.der().to_vec();
+        let tls_ca = Certificate::from_der(&der).unwrap();
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
+        (tls_ca, der, private_key)
+    }
+
+    async fn start_test_auth_server(
+        cert: Vec<u8>,
+        private_key: PrivateKeyDer<'static>,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let tls = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.into()], private_key)
+            .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(tls));
+        let task = tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let Ok(mut stream) = acceptor.accept(stream).await else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let Ok(count) = stream.read(&mut buffer).await else {
+                    return;
+                };
+                if count == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buffer[..count]);
+                if request.len() > 8192 {
+                    return;
+                }
+            }
+            let body = format!(r#"{{"nonce":"{}"}}"#, BASE64_STANDARD.encode([1u8; 32]));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+        (address, task)
+    }
+
+    fn test_oauth(tls_ca: Certificate) -> OAuthRsa {
+        let mut key_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        key_path.push("tests");
+        key_path.push("data");
+        key_path.push("rsa-key.pem");
+        let key = load_rsa_key(&std::fs::read(key_path).unwrap()).unwrap();
+        OAuthRsa::new("adapter.example", Arc::new(key), tls_ca)
+    }
 
     #[test]
     fn test_rsa_bootstrap_auth() {
@@ -640,5 +703,69 @@ mod test {
         public_key
             .verify(&data, &sig_data)
             .expect("signature verification failed");
+    }
+
+    #[tokio::test]
+    async fn oauth_tls_accepts_trusted_auth_zpr_certificate() {
+        let (tls_ca, cert, private_key) = test_tls_material(BAS_TLS_HOST);
+        let (address, server) = start_test_auth_server(cert, private_key).await;
+        let oauth = test_oauth(tls_ca);
+
+        let nonce = oauth
+            .preauthorize(address, "127.0.0.1".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(nonce, [1u8; 32]);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oauth_tls_rejects_untrusted_auth_zpr_certificate() {
+        let (_server_ca, cert, private_key) = test_tls_material(BAS_TLS_HOST);
+        let (address, server) = start_test_auth_server(cert, private_key).await;
+        let (wrong_ca, _, _) = test_tls_material(BAS_TLS_HOST);
+        let oauth = test_oauth(wrong_ca);
+
+        assert!(
+            oauth
+                .preauthorize(address, "127.0.0.1".parse().unwrap())
+                .await
+                .is_err()
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oauth_tls_rejects_trusted_certificate_for_another_hostname() {
+        let (tls_ca, cert, private_key) = test_tls_material("attacker.zpr");
+        let (address, server) = start_test_auth_server(cert, private_key).await;
+        let oauth = test_oauth(tls_ca);
+
+        assert!(
+            oauth
+                .preauthorize(address, "127.0.0.1".parse().unwrap())
+                .await
+                .is_err()
+        );
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn auth_code_redirect_is_bound_to_the_expected_https_origin() {
+        assert_eq!(
+            parse_auth_code_location("https://auth.zpr/?code=abc_DEF-123").unwrap(),
+            "abc_DEF-123"
+        );
+        for location in [
+            "https://attacker.example/?code=abc",
+            "http://auth.zpr/?code=abc",
+            "https://auth.zpr.evil/?code=abc",
+            "https://auth.zpr/?code=abc&state=other",
+            "https://auth.zpr/?code=abc&code=def",
+            "https://auth.zpr/?code=bad%20code",
+        ] {
+            assert!(parse_auth_code_location(location).is_err(), "{location}");
+        }
     }
 }

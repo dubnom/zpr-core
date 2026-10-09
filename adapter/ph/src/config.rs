@@ -9,6 +9,7 @@ use zpr::packet_info::{KM_ID_NOISE, KM_ID_NULL, KmId};
 
 use admin_api::get_data_home;
 use base64::prelude::*;
+use reqwest::tls::Certificate as TlsCertificate;
 use serde::Deserialize;
 use zpr_utils::rsa_sign::load_rsa_key;
 
@@ -195,6 +196,9 @@ pub struct Config {
     /// Resolved path to the BAS RSA key file; used by finalize() to construct `rsaoauth`.
     pub bas_key_path: Option<PathBuf>,
 
+    /// Private CA certificate for the `auth.zpr` HTTPS endpoint.
+    pub bas_tls_ca_path: Option<PathBuf>,
+
     /// The batch I/O engine to use.
     pub batch_io_engine: String,
 
@@ -317,6 +321,23 @@ impl Config {
         }
         if let Some(path) = self.bas_key_path.clone() {
             let cn = self.get_noise_cn()?;
+            let tls_ca_path = self.bas_tls_ca_path.as_ref().ok_or_else(|| {
+                ArgsError::ParseError(
+                    "authentication.tls_ca_file is required with authentication.bas_key".into(),
+                )
+            })?;
+            let tls_ca_pem = fs::read(tls_ca_path).map_err(|e| {
+                ArgsError::PathError(format!(
+                    "failed to read BAS TLS CA file {}: {e}",
+                    tls_ca_path.display()
+                ))
+            })?;
+            let tls_ca = TlsCertificate::from_pem(&tls_ca_pem).map_err(|e| {
+                ArgsError::ParseError(format!(
+                    "failed to parse BAS TLS CA file {}: {e}",
+                    tls_ca_path.display()
+                ))
+            })?;
             let pemdata = fs::read_to_string(&path).map_err(|e| {
                 ArgsError::PathError(format!(
                     "failed to read bas_key file {}: {:?}",
@@ -331,7 +352,7 @@ impl Config {
                     e
                 ))
             })?;
-            self.rsaoauth = Some(OAuthRsa::new(&cn, Arc::new(priv_key)));
+            self.rsaoauth = Some(OAuthRsa::new(&cn, Arc::new(priv_key), tls_ca));
         }
         Ok(())
     }
@@ -361,6 +382,9 @@ impl Config {
         }
         if let Some(ca_file) = &self.ca_file {
             check_file_exists("certificate authority file", ca_file)?;
+        }
+        if let Some(tls_ca_file) = &self.bas_tls_ca_path {
+            check_file_exists("BAS TLS certificate authority file", tls_ca_file)?;
         }
         if let Some(ref cf) = self.certificate_file {
             check_file_exists("certificate file", cf)?;
@@ -528,6 +552,13 @@ impl Config {
                     self.bas_key_path = Some(base_dir.join(bas_key));
                 } else {
                     self.bas_key_path = Some(bas_key.clone());
+                }
+            }
+            if let Some(tls_ca_file) = &config.tls_ca_file {
+                if tls_ca_file.is_relative() {
+                    self.bas_tls_ca_path = Some(base_dir.join(tls_ca_file));
+                } else {
+                    self.bas_tls_ca_path = Some(tls_ca_file.clone());
                 }
             }
             if let Some(auth_private_key) = &config.auth_private_key {
@@ -749,6 +780,7 @@ impl Default for Config {
             rsaoauth: None,
             bootstrap_key_path: None,
             bas_key_path: None,
+            bas_tls_ca_path: None,
             batch_io_engine: batch_io::AUTO_ENGINE_NAME.to_owned(),
             km_impl: KM_ID_NOISE,
             #[cfg(feature = "enable-security-testing")]
@@ -839,6 +871,7 @@ pub struct DnsProxyConfig {
 pub struct AuthenticationConfigSection {
     // TODO move this here: pub bootstrap_key: Option<PathBuf>,
     bas_key: Option<PathBuf>,
+    tls_ca_file: Option<PathBuf>,
     auth_private_key: Option<PathBuf>,
 }
 
@@ -959,6 +992,39 @@ mod test {
         assert_eq!(
             config.dns_proxy_server,
             Some("[fd00:1::53]:53".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_bas_authentication_requires_tls_ca() {
+        let mut config = Config::default();
+        config.name = "adapter.example".into();
+        config.bas_key_path = Some(PathBuf::from("adapter-auth.key"));
+
+        let err = config.finalize().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("authentication.tls_ca_file is required")
+        );
+    }
+
+    #[test]
+    fn test_authentication_tls_ca_path_is_resolved_relative_to_config() {
+        let mut config = Config::default();
+        config
+            .set_from_authentication(
+                &Some(AuthenticationConfigSection {
+                    bas_key: None,
+                    tls_ca_file: Some(PathBuf::from("auth-service-ca.crt")),
+                    auth_private_key: None,
+                }),
+                Path::new("/etc/zpr"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            config.bas_tls_ca_path,
+            Some(PathBuf::from("/etc/zpr/auth-service-ca.crt"))
         );
     }
 
