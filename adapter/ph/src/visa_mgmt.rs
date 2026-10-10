@@ -176,21 +176,67 @@ pub fn insert_visa(
     asm: &Assembly,
     visa: vsapi_types::Visa,
 ) -> Result<VisaId, visa_table::VisaTableError> {
-    if visa.visa_type != vsapi_types::VisaType::Full {
-        panic!("Forward only visas not yet supported")
-    }
-    let dest_addr = visa.dock_pep.as_ref().unwrap().dest_addr;
-    let next_hop = visa
-        .fwd_pep
-        .as_ref()
-        .map(|p| p.next_hop)
-        .unwrap_or(dest_addr);
-    if asm.find_egress_link(next_hop.into()).is_none() {
+    let parsed = visa_table::Visa::new(visa.clone())?;
+    let next_hop = if parsed.next_hop != IpAddress::UNSPECIFIED {
+        parsed.next_hop
+    } else {
+        parsed
+            .ftuple
+            .map(|ft| ft.dest_addr.into())
+            .ok_or(visa_table::VisaTableError::ParseError("fwd_pep"))?
+    };
+    if asm.find_egress_link(next_hop).is_none() {
         asm.counters.management[ManagementCounterType::VisaRequestError].increment();
-        return Err(visa_table::VisaTableError::DestNotFound(next_hop.into()));
+        return Err(visa_table::VisaTableError::DestNotFound(next_hop));
     }
     let visa_id = asm.visa_table.write().unwrap().insert_visa(visa)?;
     Ok(visa_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::assembly::test::{TestAssemblyBuilder, create_assembly};
+
+    fn test_visa() -> vsapi_types::Visa {
+        vsapi_types::Visa::new(
+            1,
+            1,
+            std::time::SystemTime::now(),
+            [0; 4].into(),
+            [0; 4].into(),
+            vsapi_types::DockPepType::TCP(vsapi_types::TcpUdpPep {
+                source_port: 0,
+                dest_port: 0,
+                endpoint: vsapi_types::EndpointT::Any,
+            }),
+            vsapi_types::KeySet::default(),
+            None,
+        )
+    }
+
+    #[test]
+    fn forward_only_visa_without_forward_pep_returns_error_without_panicking() {
+        let asm = create_assembly(TestAssemblyBuilder::new());
+        let mut visa = test_visa();
+        visa.visa_type = vsapi_types::VisaType::ForwardOnly;
+        visa.dock_pep = None;
+        assert!(matches!(
+            insert_visa(&asm, visa),
+            Err(visa_table::VisaTableError::ParseError("fwd_pep"))
+        ));
+    }
+
+    #[test]
+    fn full_visa_without_dock_pep_returns_error_without_panicking() {
+        let asm = create_assembly(TestAssemblyBuilder::new());
+        let mut visa = test_visa();
+        visa.dock_pep = None;
+        assert!(matches!(
+            insert_visa(&asm, visa),
+            Err(visa_table::VisaTableError::ParseError("dock_pep"))
+        ));
+    }
 }
 
 /// Given a visa ID, look up the visa in our table to find the destination address

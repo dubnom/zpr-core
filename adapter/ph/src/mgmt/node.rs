@@ -480,6 +480,23 @@ fn requested_visa_granted(
         target: FLOW_MGMT,
         "requested_visa_granted(ingress_link_id={ingress_link_id}, txn_id={txn_id}, visa_id={visa_id})");
 
+    let forward_only = asm
+        .visa_table
+        .read()
+        .unwrap()
+        .table
+        .get(&visa_id)
+        .is_some_and(|visa| visa.visa.visa_type == zpr::vsapi_types::VisaType::ForwardOnly);
+    if forward_only
+        && !asm
+            .peer_table
+            .get(ingress_link_id.get())
+            .is_some_and(|peer| matches!(peer.peer_type(), PeerType::Node))
+    {
+        error!(target: FLOW_MGMT, "forward-only visa {visa_id} requires a node ingress");
+        return requested_visa_denied(asm, ingress_link_id, txn_id);
+    }
+
     // Look up the egress link for this visa.
 
     let Ok(egress_link_id) = visa_mgmt::get_egress_link_for_visa(asm, visa_id) else {
@@ -510,7 +527,12 @@ fn requested_visa_granted(
                 // Route is no longer valid
                 return requested_visa_denied(asm, ingress_link_id, txn_id);
             };
-            tc = Some(visa.get_tc());
+            let Some(dock_tc) = visa.get_tc() else {
+                error!(target: FLOW_MGMT, "forward-only visa {visa_id} cannot terminate at an adapter");
+                drop(visa_table);
+                return requested_visa_denied(asm, ingress_link_id, txn_id);
+            };
+            tc = Some(dock_tc);
             peer_a2a_dh_pubkey = visa.get_ingress_a2a_dh_pubkey(); // Egress adapter needs ingress adapter's pubkey for DH
         }
 
@@ -712,11 +734,6 @@ fn requested_tether_granted(
         return;
     };
 
-    visa.link_forwarding_entry(ForwardingEntry(
-        ingress_link_id.get(),
-        ingress_tether_entry.key(),
-    ));
-
     // Retrieve the traffic classifier from the visa.
 
     // adapter requestors require the TC; node requestors do not
@@ -730,7 +747,14 @@ fn requested_tether_granted(
         }
 
         PeerType::Adapter => {
-            tc = Some(visa.get_tc());
+            let Some(dock_tc) = visa.get_tc() else {
+                error!(target: FLOW_MGMT, "forward-only visa {visa_id} cannot originate at an adapter");
+                drop(visa_table);
+                drop(ingress_tether_entry);
+                drop(ingress_peer_state);
+                return requested_visa_denied(asm, ingress_link_id, txn_id);
+            };
+            tc = Some(dock_tc);
             peer_a2a_dh_pubkey = visa.get_egress_a2a_dh_pubkey(); // Ingress adapter needs egress adapter's pubkey for DH
         }
 
@@ -741,6 +765,10 @@ fn requested_tether_granted(
         }
     }
 
+    visa.link_forwarding_entry(ForwardingEntry(
+        ingress_link_id.get(),
+        ingress_tether_entry.key(),
+    ));
     drop(visa_table);
 
     // Form the PEP and insert into the PFT slot we reserved (producing a tether ID).

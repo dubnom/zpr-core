@@ -59,6 +59,24 @@ To run the ZPRnet you need at least:
 
 ## How to setup a ZPRnet
 
+### Peer reconnects
+
+Node-to-node Hello completion still requires both directions, and a Hello timeout tears down
+and retries the link rather than leaving it stuck. Late successful Hello responses
+on an already-active node peer are accepted without repeating activation or
+tearing down the link. Forwarding-only visas support node-to-node transit by
+visa ID and never participate in endpoint five-tuple lookup. They cannot
+originate or terminate at an adapter. Malformed forwarding-only visas and full
+visas missing their dock PEP return explicit errors rather than panicking.
+Transient Visa Service
+registration loss is logged and returns to connection recovery instead of
+panicking the node. The bootstrap VS adapter is registered before VSS
+initialization, which requires it as a flow source. A failed VSS registration
+retries on the existing API connection rather than disconnecting the node and
+issuing duplicate connect requests. No unauthenticated transport bypass is introduced.
+Transient loss of the VS adapter does not permanently stop the API connection
+manager; an explicit shutdown still deregisters the node and stops it.
+
 ### Node denial telemetry
 
 The management RPC `counters` response includes `Buffered Denials`, a gauge of

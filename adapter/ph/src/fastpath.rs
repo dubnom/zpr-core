@@ -457,7 +457,9 @@ impl FastpathWorker {
             let Some(visa) = visa_table.table.get(&visa_id) else {
                 return;
             };
-            let tc = visa.get_tc();
+            let Some(tc) = visa.get_tc() else {
+                return;
+            };
             (
                 *tc.five_tuple(),
                 tc.compression_mode(),

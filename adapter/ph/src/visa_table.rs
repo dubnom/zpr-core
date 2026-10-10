@@ -44,7 +44,7 @@ pub struct Visa {
     // TODO add methods so that these don't have to be made pub
     pub visa: vsapi_types::Visa,
     streams: Vec<ForwardingEntry>,
-    pub ftuple: VsapiFiveTuple,
+    pub ftuple: Option<VsapiFiveTuple>,
     pub next_hop: IpAddress,
 }
 
@@ -89,22 +89,39 @@ impl PartialEq for VisaTimeout {
 impl Eq for VisaTimeout {}
 
 impl Visa {
-    pub fn new(visa: vsapi_types::Visa) -> Self {
-        if visa.visa_type != vsapi_types::VisaType::Full {
-            panic!("Forward only visas not yet supported")
-        }
-        let ftuple = visa.dock_pep.as_ref().unwrap().get_five_tuple();
+    pub fn new(visa: vsapi_types::Visa) -> Result<Self, VisaTableError> {
+        let ftuple = match visa.visa_type {
+            vsapi_types::VisaType::Full => Some(
+                visa.dock_pep
+                    .as_ref()
+                    .ok_or(VisaTableError::ParseError("dock_pep"))?
+                    .get_five_tuple(),
+            ),
+            vsapi_types::VisaType::ForwardOnly => {
+                if visa.dock_pep.is_some() {
+                    return Err(VisaTableError::ParseError("dock_pep"));
+                }
+                if visa
+                    .fwd_pep
+                    .as_ref()
+                    .is_none_or(|pep| pep.next_hop.is_unspecified())
+                {
+                    return Err(VisaTableError::ParseError("fwd_pep"));
+                }
+                None
+            }
+        };
         let next_hop = visa
             .fwd_pep
             .as_ref()
             .map(|p| p.next_hop.into())
             .unwrap_or_default();
-        Self {
+        Ok(Self {
             visa,
             streams: Vec::new(),
             ftuple,
             next_hop,
-        }
+        })
     }
 
     /// Remove all forwarding entries associated with this visa
@@ -125,14 +142,11 @@ impl Visa {
     // Visa may have wildcards.  Eg, a visa with zero for a source port will match
     // any traffic five_tuple source port value.
     pub fn match_traffic(&self, five_tuple: &FiveTuple) -> bool {
-        self.get_tc().classify_5t(five_tuple)
+        self.get_tc().is_some_and(|tc| tc.classify_5t(five_tuple))
     }
 
-    pub fn get_tc(&self) -> tc::Ip5TupleTc {
-        if self.visa.visa_type != vsapi_types::VisaType::Full {
-            panic!("Forward only visas not yet supported")
-        }
-        tc::Ip5TupleTc::new(self.visa.dock_pep.as_ref().unwrap().get_five_tuple().into())
+    pub fn get_tc(&self) -> Option<tc::Ip5TupleTc> {
+        self.ftuple.map(|ft| tc::Ip5TupleTc::new(ft.into()))
     }
 
     /// Get the ingress A2A DH public key from the visa, if present.
@@ -166,9 +180,11 @@ impl Visa {
     }
 }
 
-impl HasFiveTuple for Visa {
+struct DockFiveTuple(VsapiFiveTuple);
+
+impl HasFiveTuple for DockFiveTuple {
     fn get_five_tuple(&self) -> VsapiFiveTuple {
-        self.ftuple
+        self.0
     }
 }
 
@@ -241,8 +257,7 @@ impl VisaTable {
             .insert_visa(vs2node)
             .expect("Failed to insert visa->node visa into table");
 
-        visa_table.lookup_table = FiveTupleLookupTable::new();
-        visa_table.lookup_table.add_hash_to_table(&visa_table.table);
+        visa_table.rebuild_lookup_table();
 
         visa_table
     }
@@ -257,7 +272,7 @@ impl VisaTable {
             "Visa inserted into VisaTable ID: {visa_id}, Expiration: {}",
             expiration.format("%y-%m-%d %H:%M:%S"));
 
-        let visa = Visa::new(visa);
+        let visa = Visa::new(visa)?;
 
         let timeout = VisaTimeout {
             id: visa_id,
@@ -266,7 +281,10 @@ impl VisaTable {
         let _ = self.table.insert(visa_id, visa.clone());
         self.timeout_queue.push(timeout);
 
-        self.lookup_table.insert_visa(visa_id, visa);
+        if let Some(ftuple) = visa.ftuple {
+            self.lookup_table
+                .insert_visa(visa_id, DockFiveTuple(ftuple));
+        }
 
         Ok(visa_id)
     }
@@ -275,6 +293,16 @@ impl VisaTable {
     pub fn match_traffic(&self, five_tuple: &FiveTuple) -> Option<VisaId> {
         self.lookup_table
             .find_match(VsapiFiveTuple::from(*five_tuple))
+    }
+
+    fn rebuild_lookup_table(&mut self) {
+        let dock_visas: HashMap<_, _> = self
+            .table
+            .iter()
+            .filter_map(|(id, visa)| visa.ftuple.map(|ft| (*id, DockFiveTuple(ft))))
+            .collect();
+        self.lookup_table = FiveTupleLookupTable::new();
+        self.lookup_table.add_hash_to_table(&dock_visas);
     }
 
     /// Link a forwarding entry to a given visa
@@ -301,8 +329,7 @@ impl VisaTable {
         // The only error from `revoke_no_rebuild` is a HashMap::remove miss. If the visa
         // is gone we consider it "revoked".
         let _ = self.revoke_no_rebuild(peer_table, visa_id);
-        self.lookup_table = FiveTupleLookupTable::new();
-        self.lookup_table.add_hash_to_table(&self.table);
+        self.rebuild_lookup_table();
 
         Ok(())
     }
@@ -319,8 +346,7 @@ impl VisaTable {
             // Ignore if the visa was not found, since it might have been previously revoked
             let _ = self.revoke_no_rebuild(peer_table, timeout_entry.id);
         }
-        self.lookup_table = FiveTupleLookupTable::new();
-        self.lookup_table.add_hash_to_table(&self.table);
+        self.rebuild_lookup_table();
     }
 
     /// Revoke all visas that have any forwarding entry referencing `link_id`.
@@ -362,8 +388,7 @@ impl VisaTable {
                 // (e.g., by handle_expirations) between the collect and this loop.
                 let _ = self.revoke_no_rebuild(peer_table, visa_id);
             }
-            self.lookup_table = FiveTupleLookupTable::new();
-            self.lookup_table.add_hash_to_table(&self.table);
+            self.rebuild_lookup_table();
         }
     }
 
@@ -389,7 +414,9 @@ impl VisaTable {
             .ok_or(VisaTableError::NotFound(visa_id))?;
 
         if visa.next_hop == IpAddress::UNSPECIFIED {
-            Ok(IpAddress::from(visa.ftuple.dest_addr.clone()))
+            visa.ftuple
+                .map(|ft| IpAddress::from(ft.dest_addr))
+                .ok_or(VisaTableError::ParseError("fwd_pep"))
         } else {
             Ok(visa.next_hop)
         }
@@ -455,6 +482,62 @@ mod tests {
     use zpr::packet_info::{L3Type, SubstrateAddr};
     use zpr_utils::net_defs;
     use zpr_utils::net_defs::ip_number;
+
+    fn forwarding_visa(id: VisaId, expires: SystemTime) -> vsapi_types::Visa {
+        vsapi_types::Visa {
+            issuer_id: id,
+            config: 1,
+            expires,
+            visa_type: vsapi_types::VisaType::ForwardOnly,
+            dock_pep: None,
+            fwd_pep: Some(vsapi_types::FwdPep {
+                next_hop: "fd5a:5052::30".parse().unwrap(),
+                style: vsapi_types::FwdPepStyle::OneWay,
+            }),
+            cons: None,
+        }
+    }
+
+    #[test]
+    fn forward_only_visa_has_next_hop_but_no_endpoint_classifier() {
+        let mut table = VisaTable::new();
+        table
+            .insert_visa(forwarding_visa(12345, DateTime::<Utc>::MAX_UTC.into()))
+            .unwrap();
+        let visa = table.table.get(&12345).unwrap();
+        assert!(visa.get_tc().is_none());
+        assert_eq!(
+            table.get_visa_next_hop_addr(12345).unwrap(),
+            IpAddress::from("fd5a:5052::30".parse::<IpAddr>().unwrap())
+        );
+        let traffic = FiveTuple::from(
+            new_vsapi_visa_tcp_default(12346, DateTime::<Utc>::MAX_UTC.into())
+                .dock_pep
+                .unwrap()
+                .get_five_tuple(),
+        );
+        assert!(!visa.match_traffic(&traffic));
+        assert_eq!(table.match_traffic(&traffic), None);
+        table.rebuild_lookup_table();
+        assert_eq!(table.match_traffic(&traffic), None);
+    }
+
+    #[test]
+    fn forwarding_visa_validation_and_expiration_are_non_panicking() {
+        let asm = create_assembly(TestAssemblyBuilder::new());
+        let mut table = VisaTable::new();
+        let mut malformed = forwarding_visa(12345, DateTime::<Utc>::MAX_UTC.into());
+        malformed.fwd_pep.as_mut().unwrap().next_hop = "::".parse().unwrap();
+        assert!(matches!(
+            table.insert_visa(malformed),
+            Err(VisaTableError::ParseError("fwd_pep"))
+        ));
+        table
+            .insert_visa(forwarding_visa(12346, DateTime::<Utc>::MIN_UTC.into()))
+            .unwrap();
+        table.handle_expirations(&asm.peer_table);
+        assert!(!table.table.contains_key(&12346));
+    }
 
     /// Create a new vsapi_types::Visa, only having to specify the id and the expiration
     pub fn new_vsapi_visa_tcp_default(issuer_id: u64, expires: SystemTime) -> vsapi_types::Visa {

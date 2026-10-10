@@ -620,7 +620,10 @@ impl LinkStateWrapper {
     fn process_keying_done(&self, asm: &Arc<Assembly>) -> Result<(), LinkStateError> {
         let link_id = self.id;
         let mut locked_fsm = self.locked_fsm.lock().unwrap();
-        if locked_fsm.state != LinkState::Keying {
+        if locked_fsm.state != LinkState::Keying
+            && !(self.link_type == LinkType::NodeToNode
+                && matches!(locked_fsm.state, LinkState::Helloing | LinkState::Active))
+        {
             return Err(LinkStateError::UnexpectedTransition(
                 locked_fsm.state,
                 "KeyingDone",
@@ -685,6 +688,9 @@ impl LinkStateWrapper {
 
         debug!(target: LINK_STATE, "{} finished keying.  Starting hello", asm.formatted_link_id(link_id));
 
+        locked_fsm.echo_handle.take().inspect(|(_, h)| h.abort());
+        locked_fsm.node_hello_request_received = false;
+        locked_fsm.node_hello_response_received = false;
         locked_fsm.set_state(LinkState::Helloing);
 
         match self.link_type {
@@ -866,10 +872,13 @@ impl LinkStateWrapper {
                     Ok(())
                 }
             }
-            (LinkType::NodeToNode, LinkState::Helloing) => {
+            (LinkType::NodeToNode, LinkState::Helloing | LinkState::Active) => {
                 let mut link_data = self.locked_data.lock().unwrap();
                 link_data.asa_addresses = maybe_asa_addrs.clone();
                 drop(link_data);
+                if locked_fsm.state == LinkState::Active {
+                    return Ok(());
+                }
                 if locked_fsm.record_node_hello_response() {
                     debug!(target: LINK_STATE, "{} completed both Hello directions", asm.formatted_link_id(link_id));
                     return self.run_active(asm, locked_fsm);
@@ -1552,7 +1561,8 @@ impl LinkStateWrapper {
         // handle the timeout...
         match (self.link_type, locked_fsm.state) {
             (LinkType::AdapterToNode, LinkState::RegisterAA)
-            | (LinkType::AdapterToNode, LinkState::Helloing) => {
+            | (LinkType::AdapterToNode, LinkState::Helloing)
+            | (LinkType::NodeToNode, LinkState::Helloing) => {
                 // Timeout here means we give up on the link.
                 error!(target: LINK_STATE, "{}: timed out in state {:?}", asm.formatted_link_id(self.id), locked_fsm.state);
                 locked_fsm.set_state(LinkState::Error);
@@ -1642,7 +1652,10 @@ impl LinkStateWrapper {
             let vs_id = asm
                 .peer_table
                 .lookup_special_peer(SpecialPeerName::VisaServiceAdapter);
-            if vs_id.is_some() && vs_id.unwrap().get() == link_id {
+            if vs_id.is_some()
+                && vs_id.unwrap().get() == link_id
+                && matches!(reason, TerminateReason::Shutdown)
+            {
                 if let Some(vsconn) = asm.vsconn.as_ref() {
                     locked_fsm.set_state(LinkState::Disconnecting(reason));
 
@@ -2096,6 +2109,18 @@ mod tests {
         let mut response_first = LinkStateMachine::new(2);
         assert!(!response_first.record_node_hello_response());
         assert!(response_first.record_node_hello_request());
+    }
+
+    #[test]
+    fn active_node_accepts_late_hello_response() {
+        let asm = Arc::new(crate::assembly::test::create_assembly(
+            crate::assembly::test::TestAssemblyBuilder::new(),
+        ));
+        let link = super::LinkStateWrapper::new(1, super::LinkType::NodeToNode);
+        link.locked_fsm.lock().unwrap().set_state(LinkState::Active);
+        link.process_hello_response(&asm, crate::zdp::ResponseCode::Success, None, None)
+            .unwrap();
+        assert_eq!(link.get_state(), LinkState::Active);
     }
 
     #[test]
