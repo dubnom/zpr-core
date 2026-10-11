@@ -171,6 +171,8 @@ pub fn install_tether(
         Err(queues::TryEnqueueError::Full(_pkt)) => {
             debug!(target: FLOW_MGMT, "Requeue backpressure on bind of {five_tuple}, dropping initial packet");
             asm.counters.management[ManagementCounterType::QueueBackpressure].increment();
+            asm.counters.management[ManagementCounterType::ActorOutputRequeueBackpressure]
+                .increment();
         }
     }
 

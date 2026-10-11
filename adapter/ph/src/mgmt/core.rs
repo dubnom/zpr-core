@@ -151,6 +151,7 @@ enum PacketId {
 pub struct Sent<'a> {
     asm: &'a Assembly,
     link_id: LinkId,
+    session_id: u64,
     packet_id: PacketId,
     // NOTE: if we add anything without a trivial destructor,
     // modify `enqueue()` appropriately!
@@ -208,6 +209,9 @@ impl<'a> Sent<'a> {
 
         let mut zdpr_send = peer_state.zdpr_send.lock().unwrap();
 
+        if zdpr_send.session_id() != self.session_id {
+            return Err(());
+        }
         if let Some(pkt) = zdpr_send.cancel_queued_packet(packet_id) {
             Ok(pkt)
         } else {
@@ -267,6 +271,9 @@ impl<'a> Sent<'a> {
         };
 
         let mut zdpr_send = peer_state.zdpr_send.lock().unwrap();
+        if zdpr_send.session_id() != self.session_id {
+            return;
+        }
         let Some(_pkt) = zdpr_send.cancel_sent_packet(seq_num) else {
             // already acked or cancel-requested
             return;
@@ -307,6 +314,9 @@ impl<'a> Sent<'a> {
 
         let mut zdpr_send = peer_state.zdpr_send.lock().unwrap();
 
+        if zdpr_send.session_id() != self.session_id {
+            return;
+        }
         match self.packet_id {
             PacketId::Queued(packet_id) => zdpr_send.limit_retries_by_id(packet_id, retry_limit),
             PacketId::Sent(seq_num) => zdpr_send.limit_retries_by_seq_num(seq_num, retry_limit),
@@ -339,11 +349,15 @@ impl<'a> std::future::Future for Sent<'a> {
                 };
 
                 let mut zdpr_send = peer_state.zdpr_send.lock().unwrap();
+                if zdpr_send.session_id() != self.session_id {
+                    return Poll::Ready(Err(MgmtSendError::LinkClosed));
+                }
                 let seq_num = ready!(zdpr_send.poll_send(cx, packet_id));
                 self.update_sent_packet_id(seq_num);
                 Poll::Ready(Ok(Acked(Sent {
                     asm: self.asm,
                     link_id: self.link_id,
+                    session_id: self.session_id,
                     packet_id: self.packet_id,
                 })))
             }
@@ -351,6 +365,7 @@ impl<'a> std::future::Future for Sent<'a> {
             packet_id => Poll::Ready(Ok(Acked(Sent {
                 asm: self.asm,
                 link_id: self.link_id,
+                session_id: self.session_id,
                 packet_id,
             }))),
         }
@@ -403,6 +418,9 @@ impl<'a> std::future::Future for Acked<'a> {
 
         let mut zdpr_send = peer_state.zdpr_send.lock().unwrap();
 
+        if zdpr_send.session_id() != self.0.session_id {
+            return Poll::Ready(Err(MgmtSendError::LinkClosed));
+        }
         let seq_num;
         match self.0.packet_id {
             PacketId::Queued(packet_id) => {
@@ -479,6 +497,9 @@ impl<'a> AckedOrCanceled<'a> {
         };
 
         let mut zdpr_send = peer_state.zdpr_send.lock().unwrap();
+        if zdpr_send.session_id() != self.0.session_id {
+            return;
+        }
         zdpr_send.forget_canceled_packet(seq_num);
     }
 }
@@ -503,6 +524,9 @@ impl<'a> std::future::Future for AckedOrCanceled<'a> {
 
         let mut zdpr_send = peer_state.zdpr_send.lock().unwrap();
 
+        if zdpr_send.session_id() != self.0.session_id {
+            return Poll::Ready(Err(MgmtSendError::LinkClosed));
+        }
         let seq_num;
         match self.0.packet_id {
             PacketId::Queued(packet_id) => {
@@ -574,11 +598,13 @@ fn send_mgmt_helper(
         return Sent {
             asm,
             link_id: LINK_ID_UNKNOWN,
+            session_id: 0,
             packet_id: PacketId::Queued(0), // will not be used due to unknown link ID
         };
     };
     let mut zdpr_send = peer_state.zdpr_send.lock().unwrap();
 
+    let session_id = zdpr_send.session_id();
     let old_retry_needed = zdpr_send.retry_needed();
 
     match zdpr_send.enqueue_packet(packet) {
@@ -597,6 +623,7 @@ fn send_mgmt_helper(
             Sent {
                 asm,
                 link_id,
+                session_id,
                 packet_id: PacketId::Sent(seq_num),
             }
         }
@@ -604,6 +631,7 @@ fn send_mgmt_helper(
         zdpr::EnqueueResult::Queued(packet_id) => Sent {
             asm,
             link_id,
+            session_id,
             packet_id: PacketId::Queued(packet_id),
         },
     }
@@ -619,6 +647,8 @@ pub fn build_and_egress_packets<'a>(
     packets: impl Iterator<Item = (SeqNum, &'a mut Packet)>,
 ) {
     let mut dropped_backpressure = 0;
+    let mut dropped_hairpin_backpressure = 0;
+    let mut dropped_substrate_backpressure = 0;
 
     let Some(peer_state) = asm.peer_table.get(link_id) else {
         return;
@@ -643,6 +673,7 @@ pub fn build_and_egress_packets<'a>(
                 .is_ok()
             {
                 dropped_backpressure += 1;
+                dropped_hairpin_backpressure += 1;
             }
         } else {
             // It's possible (but unlikely) the MgmtSubstrateEgress queue fills up.
@@ -653,6 +684,7 @@ pub fn build_and_egress_packets<'a>(
                 .try_enqueue_packet(link_id, packet)
             {
                 dropped_backpressure += 1;
+                dropped_substrate_backpressure += 1;
             }
         }
     });
@@ -662,4 +694,72 @@ pub fn build_and_egress_packets<'a>(
         ManagementCounterType::QueueBackpressure,
         dropped_backpressure,
     );
+    count_events(
+        asm,
+        ManagementCounterType::MgmtHairpinDispatchBackpressure,
+        dropped_hairpin_backpressure,
+    );
+    count_events(
+        asm,
+        ManagementCounterType::MgmtSubstrateEgressBackpressure,
+        dropped_substrate_backpressure,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::assembly::test::{TestAssemblyBuilder, create_assembly};
+    use crate::link_state::LinkType;
+    use crate::peer_table::PeerState;
+    use std::net::{IpAddr, Ipv4Addr};
+    use zpr::packet_info::SubstrateAddr;
+    use zpr_utils::net_defs::ScopedIpAddr;
+
+    #[tokio::test]
+    async fn session_reset_fails_old_waiters_instead_of_acknowledging_them() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let asm = create_assembly(TestAssemblyBuilder::new());
+                let entry = asm.peer_table.vacant_entry().unwrap();
+                let peer = PeerState::new(
+                    entry.key(),
+                    LinkType::NodeToAdapter,
+                    SubstrateAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000),
+                    ScopedIpAddr::V4(Ipv4Addr::LOCALHOST),
+                    |_| async {},
+                );
+                let link_id = entry.insert(peer).get();
+                let enqueue = || {
+                    let peer = asm.peer_table.get(link_id).unwrap();
+                    let mut sender = peer.zdpr_send.lock().unwrap();
+                    let session_id = sender.session_id();
+                    let packet_id = match sender.enqueue_packet(new_heap_packet()) {
+                        zdpr::EnqueueResult::Sent(sn, _) => PacketId::Sent(sn),
+                        zdpr::EnqueueResult::Queued(id) => PacketId::Queued(id),
+                    };
+                    Sent {
+                        asm: &asm,
+                        link_id,
+                        session_id,
+                        packet_id,
+                    }
+                };
+                let acknowledged = enqueue().acked();
+                let queued = enqueue();
+                let limited = enqueue().limit_retries(1);
+                asm.peer_table
+                    .get(link_id)
+                    .unwrap()
+                    .zdpr_send
+                    .lock()
+                    .unwrap()
+                    .reset_session();
+
+                assert!(matches!(queued.await, Err(MgmtSendError::LinkClosed)));
+                assert!(matches!(acknowledged.await, Err(MgmtSendError::LinkClosed)));
+                assert!(matches!(limited.await, Err(MgmtSendError::LinkClosed)));
+            })
+            .await;
+    }
 }

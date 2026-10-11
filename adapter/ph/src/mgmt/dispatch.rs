@@ -115,6 +115,7 @@ pub fn dispatch_mgmt_packet_with_link(asm: &Assembly, pkt: &mut Packet) {
                 // we were unable to queue the packet; treat it as if
                 // we never received it (so, no ACK or updating ZDPR)
                 core::count_event(asm, ManagementCounterType::QueueBackpressure);
+                core::count_event(asm, ManagementCounterType::MgmtProcessorQueueBackpressure);
                 return;
             }
         }

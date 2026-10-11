@@ -86,7 +86,7 @@ pub enum PeerType {
     Unknown,
 }
 
-const MGMT_PROCESSOR_QUEUE_SIZE: usize = 16;
+const MGMT_PROCESSOR_QUEUE_SIZE: usize = config::DEFAULT_MGMT_PROCESSOR_QUEUE_SIZE;
 
 impl PeerState {
     pub fn new<Worker>(
@@ -397,6 +397,9 @@ impl PeerTable {
         let entry = self
             .get(link_id)
             .ok_or(PeerUpdateError::NoAssociationForLink)?;
+        entry.zdpr_send.lock().unwrap().reset_session();
+        entry.zdpr_recv.lock().unwrap().reset_session();
+        entry.zdpr_retry_timer_reset.notify_one();
         entry.km_state.transport_sa.write(Some(sa));
         Ok(())
     }
@@ -419,6 +422,9 @@ impl PeerTable {
         let entry = self
             .get(link_id)
             .ok_or(PeerUpdateError::NoAssociationForLink)?;
+        entry.zdpr_send.lock().unwrap().reset_session();
+        entry.zdpr_recv.lock().unwrap().reset_session();
+        entry.zdpr_retry_timer_reset.notify_one();
         entry.km_state.transport_sa.write(None);
         Ok(())
     }

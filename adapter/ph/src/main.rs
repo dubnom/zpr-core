@@ -739,6 +739,7 @@ fn main() -> ExitCode {
     }
 
     js.spawn_local(signal_worker::launch(asm.clone()));
+    js.spawn_local(visa_table::launch_expiration_worker(asm.clone()));
     js.spawn_local(mgmt_dispatch_worker::launch(asm.clone(), md_outq, mhd_outq));
     js.spawn_local(adapter_manager_worker::launch(asm.clone(), am_outq));
     #[cfg(not(feature = "capnp-ancillary"))]

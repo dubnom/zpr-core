@@ -211,6 +211,7 @@ impl<Pkt> BlockedState<Pkt> {
 /// `Pkt` is any abstract representation of a packet which the
 /// caller can use to recreate a packet (provided also the sequence number).
 pub struct Sender<Pkt> {
+    session_id: u64,
     /// The window size the receiver is willing to accept.
     window_size: usize,
 
@@ -404,6 +405,7 @@ impl<Pkt> Sender<Pkt> {
     pub fn new() -> Self {
         let window_size = 1;
         Self {
+            session_id: 0,
             window_size,
             last_sent: SeqNum::MAX,
             unacked: VecDeque::with_capacity(window_size),
@@ -412,6 +414,18 @@ impl<Pkt> Sender<Pkt> {
             sent: VecDeque::new(),
             stats: Default::default(),
         }
+    }
+
+    /// Discard a previous session's retries without reusing IDs held by waiters.
+    pub fn reset_session(&mut self) {
+        self.destruct_internal().for_each(drop);
+        self.sent.clear();
+        self.window_size = 1;
+        self.session_id = self.session_id.wrapping_add(1);
+    }
+
+    pub fn session_id(&self) -> u64 {
+        self.session_id
     }
 
     /// Adjust the window size the sender will use.
@@ -1129,6 +1143,8 @@ type WindowBitset = u64;
 
 /// State of the receiving side of a reliable ZDP session.
 pub struct Receiver {
+    session_start: bool,
+    session_previous: Option<SeqNum>,
     /// The window size we are willing to accept.
     window_size: usize,
 
@@ -1169,6 +1185,8 @@ impl Receiver {
         assert!(window_size <= Self::MAX_WINDOW_SIZE);
 
         Self {
+            session_start: false,
+            session_previous: None,
             window_size,
             highest_seen: SeqNum::MAX,
             recvd: WindowBitset::MAX,
@@ -1179,6 +1197,23 @@ impl Receiver {
 
     fn oldest_unrecvd_offset(&self) -> i64 {
         -(WindowBitset::BITS as i64) + (self.recvd.leading_ones() as i64) + 1
+    }
+
+    /// A newly authenticated session may start at the peer's retained sequence number.
+    pub fn reset_session(&mut self) {
+        self.recvd = WindowBitset::MAX;
+        self.canceled = WindowBitset::MAX;
+        self.session_start = true;
+        self.session_previous = None;
+    }
+
+    fn start_session(&mut self, sn: SeqNum) {
+        if self.session_start {
+            self.highest_seen = sn.wrapping_sub(1);
+            // The first arrival can be a response overtaking an earlier Hello.
+            self.session_previous = Some(sn.wrapping_sub(1));
+            self.session_start = false;
+        }
     }
 
     /// Process a received packet.
@@ -1199,7 +1234,17 @@ impl Receiver {
     }
 
     fn process_packet_or_cancel(&mut self, sn: SeqNum, is_cancel: bool) -> Disposition {
+        self.start_session(sn);
         let offset = sn.wrapping_sub(self.highest_seen) as i64;
+
+        if self.session_previous == Some(sn) && offset > -(self.window_size as i64) {
+            self.session_previous = None;
+            if !is_cancel {
+                self.canceled &= !(1 << -offset);
+                return Disposition::AckAndProcess;
+            }
+            return Disposition::AckCancelDoNotProcess;
+        }
 
         if offset <= -(self.window_size as i64) {
             // Too old!  Ignore.  (Should only happen due to race with an already-received ACK.)
@@ -1255,7 +1300,12 @@ impl Receiver {
     /// will, but does not modify state, in case e.g. the packet is unable
     /// to be processed and therefore must be dropped.
     pub fn should_process_packet(&mut self, sn: SeqNum) -> bool {
+        self.start_session(sn);
         let offset = sn.wrapping_sub(self.highest_seen) as i64;
+
+        if self.session_previous == Some(sn) && offset > -(self.window_size as i64) {
+            return true;
+        }
 
         if offset <= -(self.window_size as i64) {
             // Too old!  Ignore.  (Should only happen due to race with an already-received ACK.)
@@ -1294,9 +1344,12 @@ impl Receiver {
 
 #[cfg(test)]
 mod sender_tests {
-    use super::{EnqueueResult::*, QueuedPacketId, Sender, SenderStat, SeqNum};
+    use super::{
+        BlockedState, Disposition, EnqueueResult::*, QueuedPacketId, Receiver, Sender, SenderStat,
+        SeqNum, UnackedState,
+    };
     use std::sync::{Arc, atomic};
-    use std::task::{Context, Wake};
+    use std::task::{Context, Wake, Waker};
 
     struct TestWaker {
         woken: atomic::AtomicBool,
@@ -1365,6 +1418,98 @@ mod sender_tests {
             panic!("packet sent");
         };
         id
+    }
+
+    #[test]
+    fn session_reset_drops_retries_and_preserves_waiter_ids() {
+        let mut send = Sender::new();
+        enqueue_packet_expect_sent_with_sn(&mut send, 10, 0);
+        let queued = enqueue_packet_expect_queued(&mut send, 11);
+        let unacked_waker = TestWaker::new();
+        let blocked_waker = TestWaker::new();
+        if let UnackedState::Unacked { waker, .. } = send.unacked.front_mut().unwrap() {
+            *waker = Waker::from(unacked_waker.clone());
+        }
+        if let BlockedState::Blocked { waker, .. } = send.blocked.front_mut().unwrap() {
+            *waker = Waker::from(blocked_waker.clone());
+        }
+
+        send.reset_session();
+
+        assert_quiesced(&send);
+        assert!(unacked_waker.woken());
+        assert!(blocked_waker.woken());
+        assert_eq!(send.process_ack(0), None);
+        enqueue_packet_expect_sent_with_sn(&mut send, 12, 1);
+        let new_queued = enqueue_packet_expect_queued(&mut send, 13);
+        assert_ne!(queued, new_queued);
+    }
+
+    #[test]
+    fn receiver_session_reset_accepts_restarted_or_retained_sequence() {
+        for first in [0, 500, SeqNum::MAX] {
+            let mut receiver = Receiver::new(32);
+            for sequence in 0..64 {
+                assert!(receiver.process_packet(sequence).should_ack());
+            }
+            assert!(!receiver.should_process_packet(0));
+
+            receiver.reset_session();
+
+            assert!(receiver.should_process_packet(first));
+            assert!(matches!(
+                receiver.process_packet(first),
+                Disposition::AckAndProcess
+            ));
+            assert!(!receiver.should_process_packet(first));
+            assert!(matches!(
+                receiver.process_packet(first),
+                Disposition::AckDoNotProcess
+            ));
+            assert!(receiver.should_process_packet(first.wrapping_add(1)));
+        }
+    }
+
+    #[test]
+    fn receiver_session_reset_accepts_hello_retried_after_response() {
+        for window in [2, 32, Receiver::MAX_WINDOW_SIZE] {
+            for first in [1, 500, 0] {
+                let mut receiver = Receiver::new(window);
+                receiver.process_packet(0);
+                receiver.reset_session();
+
+                assert!(receiver.should_process_packet(first));
+                assert!(matches!(
+                    receiver.process_packet(first),
+                    Disposition::AckAndProcess
+                ));
+                let hello = first.wrapping_sub(1);
+                assert!(receiver.should_process_packet(hello));
+                assert!(matches!(
+                    receiver.process_packet(hello),
+                    Disposition::AckAndProcess
+                ));
+                assert!(matches!(
+                    receiver.process_packet(hello),
+                    Disposition::AckDoNotProcess
+                ));
+                assert!(matches!(
+                    receiver.process_packet(first),
+                    Disposition::AckDoNotProcess
+                ));
+                assert!(!receiver.should_process_packet(first.wrapping_sub(window as u64)));
+                for offset in 1..=(window as u64 * 3) {
+                    let sequence = first.wrapping_add(offset);
+                    assert!(receiver.should_process_packet(sequence));
+                    assert!(matches!(
+                        receiver.process_packet(sequence),
+                        Disposition::AckAndProcess
+                    ));
+                    assert!(!receiver.should_process_packet(sequence));
+                }
+                assert!(!receiver.should_process_packet(hello));
+            }
+        }
     }
 
     #[test]

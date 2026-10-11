@@ -51,6 +51,7 @@ fn do_request_tether_id(asm: &Arc<Assembly>, pkt: Packet) {
     let Some(txn) = peer_state.txn_mgr.try_open() else {
         debug!(target: FLOW_MGMT, "{}: backpressure on link prevents issuing bind request for {five_tuple}", asm.formatted_link_id(dock_link_id));
         mgmt::core::count_event(asm, ManagementCounterType::QueueBackpressure);
+        mgmt::core::count_event(asm, ManagementCounterType::MgmtTransactionBackpressure);
         return;
     };
 

@@ -331,6 +331,14 @@ async fn visa_request_task(
                     return requested_visa_denied(&asm, ingress_link_id, txn_id);
                 }
 
+                Err(VisaTableError::DestNotFound(addr)) => {
+                    error!(
+                        target: FLOW_MGMT,
+                        "visa request approved for destination {addr}, but no egress route remains"
+                    );
+                    return requested_visa_denied(&asm, ingress_link_id, txn_id);
+                }
+
                 Err(e) => panic!("Got unexpected error type {e}"),
             };
 
@@ -444,6 +452,14 @@ async fn visa_push_request_task(
 
                 Err(VisaTableError::ParseError(field)) => {
                     error!(target: FLOW_MGMT, "Could not parse visa: {field}");
+                    return requested_visa_denied(&asm, ingress_link_id, txn_id);
+                }
+
+                Err(VisaTableError::DestNotFound(addr)) => {
+                    error!(
+                        target: FLOW_MGMT,
+                        "pushed visa {req_visa_id} has no egress route for destination {addr}"
+                    );
                     return requested_visa_denied(&asm, ingress_link_id, txn_id);
                 }
 

@@ -61,6 +61,24 @@ To run the ZPRnet you need at least:
 
 ### Peer reconnects
 
+Visa API TCP dials have a ten-second deadline rather than waiting for the
+operating system's SYN timeout. A stalled dial returns an explicit timeout to
+the existing reconnect loop, allowing startup routes to recover promptly.
+Shutdown remains interruptible during both a dial and the reconnect delay.
+
+PH removes expired visas and their forwarding entries every second, rebuilding
+endpoint lookup when entries are removed. This prevents an expired visa from
+shadowing a fresh grant during node or VSS recovery. Reinstalling the same visa
+ID with a later expiration is not invalidated by its older expiration-queue entry.
+
+Each newly authenticated Noise session, including adapter links, discards the prior session's
+reliable-management retries and duplicate window. Local sender IDs remain
+monotonic so outstanding waiters cannot alias new messages; the receiver accepts
+the peer's first sequence number whether the peer restarted or retained state.
+The fresh receive window accepts an earlier Hello retry if a response arrives
+first; it does not mistake that unseen request for an already received packet.
+Closing the transport also discards retries before removing its security association.
+Waiters for discarded packets return a link-closed error, not an acknowledgement.
 Node-to-node Hello completion still requires both directions, and a Hello timeout tears down
 and retries the link rather than leaving it stuck. Late successful Hello responses
 on an already-active node peer are accepted without repeating activation or

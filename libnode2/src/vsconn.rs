@@ -36,6 +36,7 @@ const LIFECYCLE_EVENT_BUFFER_SIZE: usize = 64;
 
 const VSAPI_PING_INTERVAL: Duration = Duration::from_secs(5);
 const VSAPI_MAX_PING_FAILURES: u32 = 2;
+const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Minimum (and initial) timeout for a ping RPC call.
 const PING_MIN_TIMEOUT: Duration = Duration::from_secs(1);
@@ -304,9 +305,14 @@ impl VSConn {
         // a clean exit rather than an indefinite hang.
         let sock = {
             let mut connect_fut = (self.connect_fn)(self.vs_addr);
+            let connect_timeout = tokio::time::sleep(TCP_CONNECT_TIMEOUT);
+            tokio::pin!(connect_timeout);
             loop {
                 tokio::select! {
                     result = &mut connect_fut => break result?,
+                    () = &mut connect_timeout => {
+                        return Err(VSApiError::Timeout(format!("TCP connect to {}", self.vs_addr)));
+                    }
                     cmd = self.cmd_rx.recv() => match cmd {
                         Some(VS2Command::Stop(_)) | None => {
                             info!(target: VS_RPC, "VSConn: stop received during TCP connect, exiting cleanly");
@@ -1279,6 +1285,57 @@ mod tests {
             test_key(),
             connect_fn,
         )
+    }
+
+    #[tokio::test]
+    async fn stalled_tcp_connect_returns_bounded_timeout() {
+        let mut vsconn = test_vsconn(pending_connect_fn());
+        let started = tokio::time::Instant::now();
+        let result =
+            tokio::time::timeout(TCP_CONNECT_TIMEOUT + Duration::from_secs(2), vsconn.run())
+                .await
+                .expect("TCP connect exceeded its deadline");
+        assert!(
+            matches!(result, Err(VSApiError::Timeout(operation)) if operation.contains("TCP connect"))
+        );
+        assert!(started.elapsed() >= TCP_CONNECT_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn stalled_tcp_connect_retries_and_remains_stoppable() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let attempts = std::rc::Rc::new(std::cell::Cell::new(0));
+                let observed = attempts.clone();
+                let (retried_tx, retried_rx) = tokio::sync::oneshot::channel();
+                let retried_tx = std::cell::RefCell::new(Some(retried_tx));
+                let connector: ConnectFn = Box::new(move |_| {
+                    observed.set(observed.get() + 1);
+                    if observed.get() > 1
+                        && let Some(sender) = retried_tx.borrow_mut().take()
+                    {
+                        sender.send(()).unwrap();
+                    }
+                    Box::pin(std::future::pending())
+                });
+                let mut vsconn = test_vsconn(connector);
+                let handle = vsconn.handle();
+                let task = tokio::task::spawn_local(async move {
+                    vsconn.run_with_reconnect(Duration::from_millis(10)).await
+                });
+                tokio::time::timeout(TCP_CONNECT_TIMEOUT + Duration::from_secs(2), retried_rx)
+                    .await
+                    .expect("stalled connection was not retried")
+                    .unwrap();
+                assert_eq!(attempts.get(), 2);
+                handle.stop(false).await.unwrap();
+                tokio::time::timeout(Duration::from_secs(2), task)
+                    .await
+                    .expect("Stop did not interrupt retry")
+                    .unwrap()
+                    .unwrap();
+            })
+            .await;
     }
 
     /// Before fix: run_with_reconnect blocks in tokio::time::sleep(reconnect_after) even when a

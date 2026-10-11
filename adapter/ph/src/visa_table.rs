@@ -26,6 +26,18 @@ const VS_VISAS_DURATION: Duration = Duration::from_secs(60 * 60 * 24); // 24 hou
 // we are creating these we don't have access to a valid configuration ID.
 const VS_VISAS_CONFIG_ID: i64 = 100;
 
+pub async fn launch_expiration_worker(asm: std::sync::Arc<Assembly>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        asm.visa_table
+            .write()
+            .unwrap()
+            .handle_expirations(&asm.peer_table);
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum VisaTableError {
     #[error("Visa {0} Not Found")]
@@ -337,16 +349,26 @@ impl VisaTable {
     /// Remove every expired visa from the table
     pub fn handle_expirations(&mut self, peer_table: &peer_table::PeerTable) {
         let current_time = Utc::now();
+        let mut removed = false;
         while self
             .timeout_queue
             .peek()
-            .map_or(false, |entry| entry.expiration < current_time)
+            .is_some_and(|entry| entry.expiration <= current_time)
         {
             let timeout_entry = self.timeout_queue.pop().unwrap();
-            // Ignore if the visa was not found, since it might have been previously revoked
-            let _ = self.revoke_no_rebuild(peer_table, timeout_entry.id);
+            // Reinstallation can extend an ID's lifetime; an older queue entry
+            // must not revoke the replacement.
+            if self
+                .table
+                .get(&timeout_entry.id)
+                .is_some_and(|visa| DateTime::<Utc>::from(visa.visa.expires) <= current_time)
+            {
+                removed |= self.revoke_no_rebuild(peer_table, timeout_entry.id).is_ok();
+            }
         }
-        self.rebuild_lookup_table();
+        if removed {
+            self.rebuild_lookup_table();
+        }
     }
 
     /// Revoke all visas that have any forwarding entry referencing `link_id`.
@@ -482,6 +504,58 @@ mod tests {
     use zpr::packet_info::{L3Type, SubstrateAddr};
     use zpr_utils::net_defs;
     use zpr_utils::net_defs::ip_number;
+
+    #[tokio::test]
+    async fn expiration_worker_removes_stale_match_and_selects_live_replacement() {
+        let asm = Arc::new(create_assembly(TestAssemblyBuilder::new()));
+        let expired = new_vsapi_visa_tcp_default(1518, UNIX_EPOCH);
+        let traffic = FiveTuple::from(expired.dock_pep.as_ref().unwrap().get_five_tuple());
+        {
+            let mut table = asm.visa_table.write().unwrap();
+            table.insert_visa(expired).unwrap();
+            table
+                .insert_visa(new_vsapi_visa_tcp_default(
+                    1520,
+                    SystemTime::now() + Duration::from_secs(60),
+                ))
+                .unwrap();
+        }
+        let worker = tokio::spawn(launch_expiration_worker(asm.clone()));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if !asm.visa_table.read().unwrap().table.contains_key(&1518) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            asm.visa_table.read().unwrap().match_traffic(&traffic),
+            Some(1520)
+        );
+    }
+
+    #[test]
+    fn expired_queue_entry_does_not_revoke_reinstalled_visa() {
+        let asm = create_assembly(TestAssemblyBuilder::new());
+        let mut table = VisaTable::new();
+        table
+            .insert_visa(new_vsapi_visa_tcp_default(1518, UNIX_EPOCH))
+            .unwrap();
+        table
+            .insert_visa(new_vsapi_visa_tcp_default(
+                1518,
+                SystemTime::now() + Duration::from_secs(60),
+            ))
+            .unwrap();
+        table.handle_expirations(&asm.peer_table);
+        assert!(table.table.contains_key(&1518));
+        assert_eq!(table.timeout_queue.len(), 1);
+    }
 
     fn forwarding_visa(id: VisaId, expires: SystemTime) -> vsapi_types::Visa {
         vsapi_types::Visa {

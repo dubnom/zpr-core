@@ -80,7 +80,9 @@ pub const ANCILLARY_BUFFER_SIZE: usize = 128;
 const DEFAULT_BUFFER_COUNT: usize = 512; // should be at least 5x batch size; see fastpath_worker.rs for explanation
 const DEFAULT_BATCH_SIZE: usize = 64;
 const DEFAULT_DATAPATH_QUEUE_SIZE: usize = 256;
-const DEFAULT_MGMT_QUEUE_SIZE: usize = 128; // should be at least 2x batch size to avoid oscillating behavior
+pub(crate) const DEFAULT_MGMT_QUEUE_SIZE: usize = 128; // should be at least 2x batch size to avoid oscillating behavior
+pub(crate) const DEFAULT_MGMT_DATAPATH_QUEUE_SIZE: usize = 512;
+pub(crate) const DEFAULT_MGMT_PROCESSOR_QUEUE_SIZE: usize = 512;
 const DEFAULT_SERVICE_QUEUE_SIZE: usize = 128;
 
 #[cfg(not(target_os = "macos"))]
@@ -908,7 +910,7 @@ impl Default for TopologyConfig {
             capture_batch_size: DEFAULT_BATCH_SIZE,
 
             capture_queue_size: DEFAULT_DATAPATH_QUEUE_SIZE,
-            mgmt_datapath_queue_size: DEFAULT_MGMT_QUEUE_SIZE,
+            mgmt_datapath_queue_size: DEFAULT_MGMT_DATAPATH_QUEUE_SIZE,
             mgmt_dispatch_queue_size: DEFAULT_MGMT_QUEUE_SIZE,
             adapter_manager_queue_size: DEFAULT_MGMT_QUEUE_SIZE,
             km_signal_queue_size: DEFAULT_MGMT_QUEUE_SIZE,
@@ -975,6 +977,14 @@ pub fn get_noise_cn(certificate_file: &Path) -> Result<String, ArgsError> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn test_management_datapath_queue_default_is_larger_than_control_queues() {
+        let topology = TopologyConfig::default();
+
+        assert_eq!(topology.mgmt_datapath_queue_size, 512);
+        assert_eq!(topology.mgmt_dispatch_queue_size, DEFAULT_MGMT_QUEUE_SIZE);
+    }
 
     #[test]
     fn test_deserialize_adapter_config() {

@@ -115,6 +115,11 @@ pub enum FastpathCounterType {
 #[derive(Debug, Enum, Copy, Clone, Eq, Hash, PartialEq)]
 pub enum ManagementCounterType {
     QueueBackpressure,
+    MgmtProcessorQueueBackpressure,
+    MgmtTransactionBackpressure,
+    ActorOutputRequeueBackpressure,
+    MgmtSubstrateEgressBackpressure,
+    MgmtHairpinDispatchBackpressure,
     DroppedAwaitingBind,
     DroppedNop,           // normal, not an error drop
     DroppedTooOld,        // "old" management packet received (possible duplicate)
@@ -202,6 +207,11 @@ impl ManagementCounterType {
         match *self {
             // Packet drops
             Self::QueueBackpressure => "Management QueueBackpressure",
+            Self::MgmtProcessorQueueBackpressure => "Management Processor QueueBackpressure",
+            Self::MgmtTransactionBackpressure => "Management Transaction Backpressure",
+            Self::ActorOutputRequeueBackpressure => "Actor Output Requeue Backpressure",
+            Self::MgmtSubstrateEgressBackpressure => "Management Substrate Egress Backpressure",
+            Self::MgmtHairpinDispatchBackpressure => "Management Hairpin Dispatch Backpressure",
             Self::DroppedAwaitingBind => "Management Dropped Awaiting Bind",
             Self::DroppedTooOld => "Dropped Too Old",
             Self::DroppedTooNew => "Dropped Too New",
