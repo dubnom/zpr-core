@@ -95,6 +95,31 @@ issuing duplicate connect requests. No unauthenticated transport bypass is intro
 Transient loss of the VS adapter does not permanently stop the API connection
 manager; an explicit shutdown still deregisters the node and stops it.
 
+#### Packet-worker progress is a recovery prerequisite
+
+The Linux `io_uring` UDP receive operations explicitly use `MSG_DONTWAIT`.
+`O_NONBLOCK` on the socket alone does not prevent `io_uring` from waiting for
+data. Receiving must finish even if an asynchronous cancellation does not find
+its request; otherwise a batch can wait indefinitely, blocking both traffic and
+the management messages needed to recover the link.
+
+The cancellation-failure regression submits each production receive variant
+without its cancellation and requires an immediate `EAGAIN` completion on an
+empty socket. A subprocess watchdog bounds a failure instead of hanging the
+test runner. Sparse concurrent UDP traffic is tested separately across the
+available batch engines:
+
+```sh
+cargo test -p ph --lib batch_io::
+```
+
+Run the Linux tests in a disposable network namespace/container, with
+`io_uring` enabled and permitted by its security profile. They need no live
+Visa Service, organization state, TUN device or runtime restart. These tests
+validate packet-I/O progress, not sustained control-plane recovery: that still
+requires repeated workloads and idle/fault cycles spanning authentication,
+visa and session expiration, without coordinated restarts.
+
 ### Node denial telemetry
 
 The management RPC `counters` response includes `Buffered Denials`, a gauge of

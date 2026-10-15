@@ -12,7 +12,7 @@ pub use self::macos::TunPiImpl;
 #[cfg(target_os = "macos")]
 pub use self::macos::ZprTun;
 
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", test))]
 pub(crate) mod ios;
 #[cfg(target_os = "ios")]
 pub use self::ios::TunPiImpl;

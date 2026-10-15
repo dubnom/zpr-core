@@ -72,3 +72,50 @@ impl From<TunPi> for TunPiImpl {
         Self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixDatagram;
+
+    #[test]
+    fn tunnel_creation_requires_a_host_supplied_packet_flow() {
+        let Err(error) = ZprTun::new_mq(None, 1, None) else {
+            panic!("iOS TUN creation must be delegated to the Network Extension host");
+        };
+
+        assert!(matches!(
+            error,
+            ZprTunError::PlatformError(message)
+                if message == "iOS packet I/O must be supplied by a Network Extension host"
+        ));
+    }
+
+    #[test]
+    fn address_lifecycle_is_delegated_to_the_network_extension_host() {
+        let (packet_socket, _peer) = UnixDatagram::pair().unwrap();
+        let tun = ZprTun::from_packet_fd(OwnedFd::from(packet_socket)).unwrap();
+
+        assert_eq!(tun.name(), "packet-flow");
+        tun.set_carrier(true).unwrap();
+        assert_eq!(
+            tun.add_address(IpAddr::V4(Ipv4Addr::LOCALHOST), 32)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            tun.clear_address(IpAddr::V6(Ipv6Addr::LOCALHOST), 128)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+    }
+
+    #[test]
+    fn packet_flow_uses_raw_ip_packets_without_a_platform_header() {
+        assert_eq!(std::mem::size_of::<TunPiImpl>(), 0);
+    }
+}

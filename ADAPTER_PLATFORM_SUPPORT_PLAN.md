@@ -172,7 +172,36 @@ real ZPR packet-flow validation remain release gates; see
   route/DNS settings, network changes, extension termination/restart, and
   system-enforced no-bypass behavior.
 
+**Local groundwork, 2026-10-13:** The Rust library now cross-compiles for
+`aarch64-apple-ios` when `zpr-ext` is resolved to the adjacent workspace source
+with iOS socket cfg support. The iOS TUN shim accepts a host-supplied datagram
+socket and deliberately refuses to configure addresses itself; regression tests
+cover that boundary and verify that iOS packets have no platform packet-info
+header. The production dependency
+is still pinned to `zpr-ext-v0.5.3`, which lacks those iOS cfgs, so the normal
+locked build remains blocked until the dependency fix is released and adopted.
+There is not yet a Network Extension target/provider, FFI runtime entry point,
+packet-flow pump, entitlement, or iOS app-group configuration. This is build
+groundwork only, not a usable or certified iOS adapter.
+
+**Cross-target compile follow-up, 2026-10-13:** The complete `ph` binary and
+test code now type-check for `aarch64-apple-ios` with the same local `zpr-ext`
+override. The optional DNS stub deliberately refuses to open an upstream
+connection on iOS until the Network Extension host can guarantee that traffic is
+routed through the tunnel; it must not silently fall back to the physical
+interface. The iOS-target tests compile but require a native iOS test host to
+execute.
+
 ### 6. Release Gates
+
+**Publication reconciliation, 2026-10-15 UTC (2026-10-14 EDT):** Native macOS
+`cargo test` passes, including 293 `ph` library tests with two ignored tests.
+This source checkpoint includes the iOS cfg and packet-worker changes on
+`work/macos-tun-address`; this does not move them to the main branch, adopt a
+new `zpr-ext` dependency tag, execute iOS tests, or certify Linux `io_uring`
+behavior on macOS. The earlier local-override iOS build evidence remains
+groundwork only. Sustained live recovery and the platform release gates below
+remain open.
 
 A platform is not supported by a successful build alone. Each release target
 must pass:

@@ -1,15 +1,20 @@
 //! Loopback DNS stub that forwards queries to a bootstrapped ZPR DNS service.
 
+#[cfg(not(target_os = "ios"))]
 use std::ffi::CString;
 use std::io;
 use std::net::SocketAddr;
+#[cfg(not(target_os = "ios"))]
 use std::num::NonZeroU32;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpSocket, TcpStream, UdpSocket};
+#[cfg(not(target_os = "ios"))]
+use tokio::net::TcpSocket;
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
@@ -189,6 +194,7 @@ async fn forward_query(
     Ok(response)
 }
 
+#[cfg(not(target_os = "ios"))]
 async fn connect_via_tun(upstream: SocketAddr, tun_interface: &str) -> io::Result<TcpStream> {
     let interface_name = CString::new(tun_interface).map_err(|_| {
         io::Error::new(
@@ -211,6 +217,14 @@ async fn connect_via_tun(upstream: SocketAddr, tun_interface: &str) -> io::Resul
         upstream.is_ipv4(),
     )?;
     socket.connect(upstream).await
+}
+
+#[cfg(target_os = "ios")]
+async fn connect_via_tun(_upstream: SocketAddr, _tun_interface: &str) -> io::Result<TcpStream> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "iOS DNS proxy upstream routing must be provided by the Network Extension host",
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -276,6 +290,7 @@ fn bind_to_interface(
 mod tests {
     use super::*;
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn forwards_a_dns_message_over_tcp() {
         let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -306,6 +321,21 @@ mod tests {
         upstream.await.unwrap();
     }
 
+    #[cfg(target_os = "ios")]
+    #[tokio::test]
+    async fn refuses_to_open_dns_upstream_outside_the_network_extension_route() {
+        let error = connect_via_tun("192.0.2.1:53".parse().unwrap(), "packet-flow")
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(
+            error.to_string(),
+            "iOS DNS proxy upstream routing must be provided by the Network Extension host"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn rejects_a_mismatched_transaction_id() {
         let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -336,6 +366,7 @@ mod tests {
         upstream.await.unwrap();
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn serves_udp_and_tcp_clients_from_tcp_upstream() {
         let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -399,13 +430,13 @@ mod tests {
         upstream_worker.await.unwrap();
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn loopback_interface() -> &'static str {
-        "lo0"
-    }
-
-    #[cfg(target_os = "linux")]
-    fn loopback_interface() -> &'static str {
+        #[cfg(target_os = "macos")]
+        {
+            return "lo0";
+        }
+        #[cfg(target_os = "linux")]
         "lo"
     }
 }

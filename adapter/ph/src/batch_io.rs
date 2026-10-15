@@ -400,7 +400,14 @@ mod io_uring {
                 msg_flags: 0,
             });
 
-            (opcode::RecvMsg::new(fd, msghdr_ref as *mut _).build(), buf)
+            // O_NONBLOCK alone does not prevent io_uring from polling for data.
+            // A receive must finish even if its cancellation misses the request.
+            (
+                opcode::RecvMsg::new(fd, msghdr_ref as *mut _)
+                    .flags(libc::MSG_DONTWAIT as u32)
+                    .build(),
+                buf,
+            )
         }
 
         fn process_result(
@@ -465,7 +472,12 @@ mod io_uring {
                 msg_flags: 0,
             });
 
-            (opcode::RecvMsg::new(fd, msghdr_ref as *mut _).build(), buf)
+            (
+                opcode::RecvMsg::new(fd, msghdr_ref as *mut _)
+                    .flags(libc::MSG_DONTWAIT as u32)
+                    .build(),
+                buf,
+            )
         }
 
         fn process_result(
@@ -728,6 +740,42 @@ mod io_uring {
             results: &mut Vec<Result<ReceivedPacket>>,
         ) -> Result<usize> {
             self.do_batch_op(TryRecvBufFromToBatchOp::new(), fd, bufs, results)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn receive_does_not_depend_on_cancellation() {
+            crate::batch_io::tests::run_with_watchdog(
+                "batch_io::io_uring::tests::receive_does_not_depend_on_cancellation",
+                "PH_BATCH_IO_MISSED_CANCEL_CHILD",
+                || {
+                    for with_destination in [false, true] {
+                        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                        socket.set_nonblocking(true).unwrap();
+                        super::super::set_recv_packet_info(&socket, true).unwrap();
+                        let mut ring = IoUring::new(2).unwrap();
+                        let mut buf = Vec::with_capacity(64);
+                        let mut from = TryRecvBufFromBatchOp::new();
+                        let mut from_to = TryRecvBufFromToBatchOp::new();
+                        let fd = types::Fd(socket.as_raw_fd());
+                        let (entry, _state) = if with_destination {
+                            from_to.build_op(fd, &mut buf, 0)
+                        } else {
+                            from.build_op(fd, &mut buf, 0)
+                        };
+                        // Model a cancellation that did not find its receive request.
+                        // All pointed-to buffers remain alive until completion.
+                        unsafe { ring.submission().push(&entry) }.unwrap();
+                        ring.submit_and_wait(1).unwrap();
+                        let completion = ring.completion().next().unwrap();
+                        assert_eq!(completion.result(), -libc::EAGAIN);
+                    }
+                },
+            );
         }
     }
 
@@ -1290,6 +1338,75 @@ mod tests {
     use std::net::UdpSocket;
     use std::os::unix::net::UnixDatagram;
     use std::time::Duration;
+
+    pub(super) fn run_with_watchdog(test_name: &str, child_env: &str, run: impl FnOnce()) {
+        if std::env::var_os(child_env).is_some() {
+            run();
+            return;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--include-ignored", "--nocapture"])
+            .env(child_env, "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "{test_name} subprocess failed: {status}");
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("{test_name}: nonblocking batch I/O stalled the packet worker");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn test_sparse_udp_receives_do_not_block_packet_worker() {
+        run_with_watchdog(
+            "batch_io::tests::test_sparse_udp_receives_do_not_block_packet_worker",
+            "PH_BATCH_IO_UDP_RECEIVE_CHILD",
+            || {
+                for engine in ENGINES {
+                    let receiver = udp_socket().unwrap();
+                    receiver.set_nonblocking(true).unwrap();
+                    set_recv_packet_info(&receiver, true).unwrap();
+                    let sender = udp_socket().unwrap();
+                    sender.connect(receiver.local_addr().unwrap()).unwrap();
+                    let producer = std::thread::spawn(move || {
+                        for i in 0..10_000 {
+                            sender.send(b"packet").unwrap();
+                            if i % 17 == 0 {
+                                std::thread::sleep(Duration::from_micros(10));
+                            }
+                        }
+                    });
+                    let mut bio = engine.instantiate(64).unwrap();
+                    let mut received = 0;
+                    for _ in 0..10_000 {
+                        let mut bufs = vec![Vec::with_capacity(64); 64];
+                        let mut results = Vec::new();
+                        match bio.try_recv_buf_from_to_batch(
+                            &receiver,
+                            bufs.iter_mut(),
+                            &mut results,
+                        ) {
+                            Ok(_) => {
+                                received += results.iter().filter(|result| result.is_ok()).count();
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                            Err(error) => panic!("batch receive failed: {error}"),
+                        }
+                    }
+                    producer.join().unwrap();
+                    assert!(received > 0);
+                }
+            },
+        );
+    }
 
     #[test]
     fn test_write() {
