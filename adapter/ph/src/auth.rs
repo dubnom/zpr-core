@@ -570,6 +570,10 @@ fn parse_auth_code_location(location: &str) -> Result<String, AuthError> {
 }
 
 #[cfg(test)]
+#[path = "auth_helper_ipc.rs"]
+mod auth_helper_ipc;
+
+#[cfg(test)]
 mod test {
     use super::*;
     use aws_lc_rs::signature::{KeyPair, RSA_PKCS1_2048_8192_SHA256, UnparsedPublicKey};
