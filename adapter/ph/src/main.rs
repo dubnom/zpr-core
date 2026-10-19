@@ -1,7 +1,9 @@
 #![cfg_attr(feature = "ci", deny(warnings))]
 
 #[cfg(not(windows))]
-include!("main_unix.inc.rs");
+fn main() -> std::process::ExitCode {
+    ph::runner::run_cli()
+}
 
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {

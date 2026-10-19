@@ -10,70 +10,42 @@ use std::sync::{Arc, Mutex};
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
-use tracing::*;
-
-mod adapter_manager_worker;
-mod adapter_tables;
-mod address_pool;
-mod admin_worker;
-mod assembly;
-mod auth;
-mod batch_io;
-mod capture_worker;
-mod classifier;
-mod compress;
-mod config;
-mod counters;
-mod defs;
-mod deny_cache;
-mod dns_proxy;
-mod fastpath;
-mod fastpath_io;
-mod fastpath_worker;
-mod flow_control;
-mod forwarding_tables;
-mod km;
-mod km_cert_exchange;
-mod km_multiplexor;
-mod km_noise;
-mod link_state;
-mod logging;
-mod main_argparse;
-mod main_args;
-mod mgmt;
-mod mgmt_dispatch_worker;
-mod mgmt_processor_worker;
-mod packet;
-mod packet_queue;
-mod packet_steering;
-mod pcap_writer;
-mod peer_table;
-mod pki;
-mod prelude;
-mod queues;
-mod sample_ring;
+use tokio_util::sync::CancellationToken;
+use crate::adapter_manager_worker;
+use crate::adapter_tables;
+use crate::admin_worker;
+use crate::assembly;
+use crate::batch_io;
+use crate::capture_worker;
+use crate::config;
+use crate::deny_cache;
+use crate::dns_proxy;
+use crate::fastpath;
+use crate::fastpath_worker;
+use crate::flow_control;
+use crate::km_cert_exchange;
+use crate::km_multiplexor;
+use crate::km_noise;
+use crate::link_state;
+use crate::logging;
+use crate::main_argparse;
+use crate::mgmt_dispatch_worker;
+use crate::mgmt_processor_worker;
+use crate::packet_queue;
+use crate::packet_steering;
+use crate::peer_table;
+use crate::pki;
+use crate::prelude::*;
 #[cfg(not(feature = "capnp-ancillary"))]
-mod set_capture_file_worker;
-mod signal_worker;
-mod special_peers;
-mod sys;
-mod tc;
-mod test_packet;
-mod tlv;
-mod tun_ctl;
-mod two_way_queue;
-mod visa_mgmt;
-mod visa_table;
-mod vs_worker;
-mod vss_worker;
-mod zdp;
-mod zdp_ll;
-mod zdpr;
-mod zdpr_worker;
-mod zprtun;
-
-#[cfg(test)]
-mod km_testdata;
+use crate::set_capture_file_worker;
+use crate::signal_worker;
+use crate::sys;
+use crate::tun_ctl;
+use crate::two_way_queue;
+use crate::visa_table;
+use crate::vs_worker;
+use crate::vss_worker;
+use crate::zdpr_worker;
 
 use assembly::{Assembly, PhMode};
 use capture_worker::CaptureWorker;
@@ -83,7 +55,7 @@ use km_multiplexor::KmState;
 use km_noise::NoiseKeypair;
 use logging::targets::STARTUP;
 use pki::load_cert;
-use queues::*;
+use crate::queues::*;
 use sys::ZprTun;
 use tun_ctl::TunCtl;
 use zpr_ext::socket2::SockAddrExt;
@@ -116,14 +88,30 @@ fn packet_buffer_socket_pair(
     Ok((a.into(), b.into()))
 }
 
-fn main() -> ExitCode {
+/// Run the command-line PH process with its existing signal-driven lifecycle.
+pub fn run_cli() -> ExitCode {
+    run(None, None)
+}
+
+/// Run PH using command-line arguments with a caller-controlled shutdown token.
+///
+/// The caller should run this blocking function on a dedicated thread and
+/// cancel `stop` to request graceful peer shutdown followed by worker teardown.
+pub fn run_with_cancellation(args: Vec<String>, stop: CancellationToken) -> ExitCode {
+    run(Some(args), Some(stop))
+}
+
+fn run(args: Option<Vec<String>>, stop: Option<CancellationToken>) -> ExitCode {
     let system_start_time = std::time::Instant::now();
 
     //
     // parse configuration from command line
     //
 
-    let (ph_mode, mut config) = match main_argparse::argparse(None) {
+    let borrowed_args = args
+        .as_ref()
+        .map(|args| args.iter().map(String::as_str).collect());
+    let (ph_mode, mut config) = match main_argparse::argparse(borrowed_args) {
         Ok((ph_mode, config)) => (ph_mode, config),
         Err(e) => {
             eprintln!("failed to parse command line arguments: {:?}", e);
@@ -736,7 +724,9 @@ fn main() -> ExitCode {
         }
     }
 
-    js.spawn_local(signal_worker::launch(asm.clone()));
+    if stop.is_none() {
+        js.spawn_local(signal_worker::launch(asm.clone()));
+    }
     js.spawn_local(visa_table::launch_expiration_worker(asm.clone()));
     js.spawn_local(mgmt_dispatch_worker::launch(asm.clone(), md_outq, mhd_outq));
     js.spawn_local(adapter_manager_worker::launch(asm.clone(), am_outq));
@@ -769,6 +759,7 @@ fn main() -> ExitCode {
     //
 
     let mut fastpath_threads = Vec::new();
+    let fastpath_stop = stop.as_ref().map(|_| CancellationToken::new());
 
     let mut mgmt_substrate_outq = Some(mgmt_substrate_outq); // only the first fastpath worker gets this
 
@@ -801,6 +792,7 @@ fn main() -> ExitCode {
                     tun_dev,
                     requeue_outq,
                     mgmt_substrate_outq.take(),
+                    fastpath_stop.clone(),
                 ))
                 .unwrap(),
         );
@@ -884,8 +876,38 @@ fn main() -> ExitCode {
     //
 
     local_set.block_on(&runtime, async {
-        while let Some(res) = js.join_next().await {
-            res.unwrap();
+        if let Some(stop) = stop {
+            tokio::select! {
+                _ = stop.cancelled() => {
+                    asm.tun_ctl.set_carrier(false).unwrap();
+                    if tokio::time::timeout(std::time::Duration::from_secs(5), asm.shutdown())
+                        .await
+                        .is_err()
+                    {
+                        warn!(target: STARTUP, "timed out waiting for PH peers to disconnect");
+                    }
+                    if let Some(fastpath_stop) = fastpath_stop {
+                        fastpath_stop.cancel();
+                    }
+                    js.abort_all();
+                    while let Some(result) = js.join_next().await {
+                        if let Err(error) = result
+                            && !error.is_cancelled()
+                        {
+                            error!(target: STARTUP, "worker failed during shutdown: {error}");
+                        }
+                    }
+                }
+                result = async {
+                    while let Some(result) = js.join_next().await {
+                        result.unwrap();
+                    }
+                } => result,
+            }
+        } else {
+            while let Some(result) = js.join_next().await {
+                result.unwrap();
+            }
         }
     });
 

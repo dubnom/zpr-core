@@ -29,6 +29,7 @@ pub mod km_noise;
 pub mod link_state;
 pub mod logging;
 pub mod main_args;
+mod main_argparse;
 pub mod mgmt;
 pub mod mgmt_dispatch_worker;
 pub mod mgmt_processor_worker;
@@ -58,6 +59,8 @@ pub mod zdp_ll;
 pub mod zdpr;
 pub mod zdpr_worker;
 pub mod zprtun;
+mod dns_proxy;
+pub mod runner;
 
 #[cfg(test)]
 mod km_testdata;

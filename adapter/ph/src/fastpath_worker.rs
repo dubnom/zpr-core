@@ -5,6 +5,7 @@ use crate::prelude::*;
 use crate::sys::{PacketDevice, ReadinessInterest, ReadinessRequest, wait_for_readiness};
 use enum_map::{Enum, enum_map};
 use std::net::UdpSocket;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Enum)]
 enum PollSlot {
@@ -23,6 +24,7 @@ pub fn launch(
     actor_input_tun: Arc<dyn PacketDevice>,
     requeue_outq: packet_queue::Receiver<{ config::PACKET_BUFFER_SIZE }>,
     mgmt_substrate_outq: Option<packet_queue::Receiver<{ config::PACKET_BUFFER_SIZE }>>,
+    stop: Option<CancellationToken>,
 ) -> impl FnOnce() {
     move || {
         let worker = FastpathWorker::new(config, worker_index, asm.clone());
@@ -34,16 +36,23 @@ pub fn launch(
             mgmt_substrate_outq,
         )
         .expect("failed to initialize fastpath readiness");
-        fastpath_main(worker, io);
+        fastpath_main(worker, io, stop);
     }
 }
 
-fn fastpath_main(mut worker: FastpathWorker, mut io: FastpathIo) {
+fn fastpath_main(
+    mut worker: FastpathWorker,
+    mut io: FastpathIo,
+    stop: Option<CancellationToken>,
+) {
     // See discussion on fairness below for the reason for this assertion
     // and the magic constant used in it.
     assert!(worker.config.buffer_count >= 5 * worker.config.batch_size);
 
     loop {
+        if stop.as_ref().is_some_and(CancellationToken::is_cancelled) {
+            break;
+        }
         // try to immediately output anything we've queued up;
         // if we can't, drop it, unless it's on the substrate and marked PRIORITY
         io.process_out_queues(&mut worker);
@@ -73,12 +82,15 @@ fn fastpath_main(mut worker: FastpathWorker, mut io: FastpathIo) {
                     interest: ReadinessInterest::new(true, false),
                 },
             ],
-            None,
+            stop.as_ref().map(|_| 100),
         ) {
             Ok(events) => events,
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(err) => panic!("fastpath readiness wait failed: {err}"),
         };
+        if stop.as_ref().is_some_and(CancellationToken::is_cancelled) {
+            break;
+        }
         let revents = enum_map! {
             PollSlot::Substrate => events[0],
             PollSlot::Tun => events[1],
