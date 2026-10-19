@@ -11,6 +11,7 @@ on:
       - 'cbpf-rs/**'
       - 'libnode2/**'
       - 'integration-test/**'
+      - 'packaging/macos/**'
       - 'zpr/**'
       - '.github/workflows/adapter.yml'
       - 'Cargo.toml'
@@ -24,6 +25,7 @@ on:
       - 'cbpf-rs/**'
       - 'libnode2/**'
       - 'integration-test/**'
+      - 'packaging/macos/**'
       - 'zpr/**'
       - '.github/workflows/adapter.yml'
       - 'Cargo.toml'
@@ -39,6 +41,84 @@ env:
   VISA_SERVICE_RELEASE: v0.18.0
 
 jobs:
+  macos-arm64-package:
+    name: macOS Apple Silicon package
+    runs-on: macos-14
+    timeout-minutes: 60
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Verify Apple Silicon runner
+      run: |
+        test "$(uname -s)" = "Darwin"
+        test "$(uname -m)" = "arm64"
+
+    - name: Install native build dependencies
+      run: brew install capnp libpcap
+
+    - name: Install stable Rust
+      run: |
+        rustup toolchain install stable --profile minimal
+        rustup default stable
+
+    - name: Setup Git credentials
+      timeout-minutes: 1
+      env:
+        ZPR_CICD_RO_TOKEN: ${{ secrets.ZPR_CICD_RO_TOKEN }}
+      run: |
+        echo 'echo $ZPR_CICD_RO_TOKEN' > "$HOME/.git-askpass"
+        chmod +x "$HOME/.git-askpass"
+        echo "GIT_ASKPASS=$HOME/.git-askpass" >> "$GITHUB_ENV"
+
+    - name: Test adapter packages
+      run: cargo test --locked --package ph --package ph-cli
+
+    - name: Build unsigned development package
+      run: |
+        version="0.0.${GITHUB_RUN_NUMBER}"
+        sh packaging/macos/build-adapter-pkg.sh \
+          "$version" dist/zpr-adapter-macos-arm64.pkg \
+          --development-unsigned
+        target/aarch64-apple-darwin/release/ph adapter --help
+        target/aarch64-apple-darwin/release/ph-cli --help
+
+    - uses: actions/upload-artifact@v8
+      with:
+        name: zpr-adapter-macos-arm64-development
+        path: dist/zpr-adapter-macos-arm64.pkg
+        if-no-files-found: error
+        retention-days: 1
+
+  ios-arm64-library-build:
+    name: iOS arm64 Rust library build (not app)
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Install native build dependencies
+      run: brew install capnp
+
+    - name: Install stable Rust and iOS target
+      run: |
+        rustup toolchain install stable --profile minimal
+        rustup default stable
+        rustup target add aarch64-apple-ios
+
+    - name: Setup Git credentials
+      timeout-minutes: 1
+      env:
+        ZPR_CICD_RO_TOKEN: ${{ secrets.ZPR_CICD_RO_TOKEN }}
+      run: |
+        echo 'echo $ZPR_CICD_RO_TOKEN' > "$HOME/.git-askpass"
+        chmod +x "$HOME/.git-askpass"
+        echo "GIT_ASKPASS=$HOME/.git-askpass" >> "$GITHUB_ENV"
+
+    - name: Build iOS Rust library only
+      run: cargo build --locked --release --package ph --lib --target aarch64-apple-ios
+
   # Build and upload ph
   build-ph:
     name: PH

@@ -4,6 +4,8 @@ use zerocopy::*;
 use zpr::packet_info::L3Type;
 use zpr_utils::net_defs;
 
+pub const PACKET_BUFFER_SIZE: usize = 4096 * 3;
+
 /// Packet direction with respect to an interface.
 /// Primary use is for constructing libpcap link-layer header.
 #[derive(Copy, Clone)]

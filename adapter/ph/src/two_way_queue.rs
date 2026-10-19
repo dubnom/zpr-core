@@ -35,7 +35,6 @@ use crate::sys::notify::Notify;
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
-use std::os::fd::BorrowedFd;
 use std::rc::Rc;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -147,8 +146,8 @@ impl<U> ReturnQueue<U> {
         return recvd;
     }
 
-    pub fn poll_fd(&self) -> BorrowedFd<'_> {
-        self.handle.notify.poll_fd()
+    pub fn readiness_source(&self) -> &crate::sys::ReadinessSource {
+        self.handle.notify.readiness_source()
     }
 }
 
@@ -318,7 +317,7 @@ mod tests {
     #[test]
     fn test_empty_returns() {
         let mut retq = ReturnQueue::<()>::new();
-        assert!(!poll(retq.poll_fd()));
+        assert!(!poll(retq.readiness_source()));
         assert!(retq.try_recv_return().is_none());
         let mut rets = Vec::new();
         assert_eq!(retq.try_recv_many_returns(&mut rets, 16), 0);
@@ -348,10 +347,10 @@ mod tests {
         *item = 456;
         drop(item);
 
-        assert!(poll(retq.poll_fd()));
+        assert!(poll(retq.readiness_source()));
         let ret_item = retq.try_recv_return().unwrap();
         assert_eq!(ret_item, 456);
-        assert!(!poll(retq.poll_fd()));
+        assert!(!poll(retq.readiness_source()));
     }
 
     #[test]
@@ -371,16 +370,23 @@ mod tests {
         }
 
         for i in 0..16 {
-            assert!(poll(retq.poll_fd()));
+            assert!(poll(retq.readiness_source()));
             let ret_item = retq.try_recv_return().unwrap();
             assert_eq!(ret_item, 456 + i);
         }
 
-        assert!(!poll(retq.poll_fd()));
+        assert!(!poll(retq.readiness_source()));
     }
 
-    fn poll(fd: BorrowedFd<'_>) -> bool {
-        let mut pfd = nix::poll::PollFd::new(fd, nix::poll::PollFlags::POLLIN);
-        nix::poll::poll(std::slice::from_mut(&mut pfd), nix::poll::PollTimeout::ZERO).unwrap() > 0
+    fn poll(source: &crate::sys::ReadinessSource) -> bool {
+        crate::sys::wait_for_readiness(
+            [crate::sys::ReadinessRequest {
+                source,
+                interest: crate::sys::ReadinessInterest::new(true, false),
+            }],
+            Some(0),
+        )
+        .unwrap()[0]
+            .readable
     }
 }

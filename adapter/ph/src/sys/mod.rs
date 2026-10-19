@@ -19,12 +19,66 @@ pub use self::ios::TunPiImpl;
 #[cfg(target_os = "ios")]
 pub use self::ios::ZprTun;
 
+#[cfg(windows)]
+pub use self::windows::{TunPiImpl, ZprTun};
+
 #[cfg(any(target_os = "ios", test))]
 pub(crate) mod packet_fd;
+#[cfg(unix)]
 pub(crate) mod posix;
-pub use self::posix::notify;
+#[cfg(windows)]
+pub(crate) mod windows;
 
+#[cfg(unix)]
+pub use self::posix::notify;
+#[cfg(unix)]
+pub use self::posix::{ReadinessInterest, ReadinessRequest, ReadinessSource, wait_for_readiness};
+#[cfg(windows)]
+pub use self::windows::{
+    ReadinessEvents, ReadinessInterest, ReadinessRequest, ReadinessSource, wait_for_readiness,
+};
+
+use crate::batch_io::BatchIo;
+use crate::packet::Packet;
 use bytes::buf;
+use std::io;
+
+pub trait PacketDevice: Send + Sync {
+    fn readiness_source(&self) -> io::Result<ReadinessSource>;
+
+    fn packet_info_size(&self) -> usize;
+
+    fn read_packets(
+        &self,
+        batch_io: &mut BatchIo,
+        packets: &mut [Packet],
+        results: &mut Vec<io::Result<usize>>,
+    ) -> io::Result<usize>;
+
+    fn write_packets(
+        &self,
+        batch_io: &mut BatchIo,
+        packets: &[Packet],
+        results: &mut Vec<io::Result<usize>>,
+    ) -> io::Result<usize>;
+}
+
+#[cfg(unix)]
+pub fn readiness_source_for_socket(
+    socket: &std::net::UdpSocket,
+) -> std::io::Result<ReadinessSource> {
+    posix::readiness_source_for_socket(socket)
+}
+
+#[cfg(windows)]
+pub fn readiness_source_for_socket(
+    _socket: &std::net::UdpSocket,
+) -> std::io::Result<ReadinessSource> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Windows packet I/O is unavailable in this compile-only build",
+    ))
+}
 
 /// per-packet packet info
 #[derive(Clone, Copy)]

@@ -2,13 +2,12 @@
 //!
 //! Some properties:
 //! * no allocations/deallocations on datapath (receive) side
-//! * datapath (receive) notifications provided via file descriptor
+//! * datapath (receive) notifications provided via an opaque readiness source
 //! * async mgmt (send) side
 //! * bounded queue
 
 use crate::packet::{self, Packet, PacketBuffer};
 use crate::sys::notify;
-use std::os::fd::BorrowedFd;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -85,8 +84,8 @@ pub struct Receiver<const BUFSIZE: usize> {
 }
 
 impl<const BUFSIZE: usize> Receiver<BUFSIZE> {
-    pub fn poll_fd(&self) -> BorrowedFd<'_> {
-        self.notify.poll_fd()
+    pub fn readiness_source(&self) -> &crate::sys::ReadinessSource {
+        self.notify.readiness_source()
     }
 
     #[allow(dead_code)]
@@ -150,14 +149,12 @@ pub fn packet_queue<const BUFSIZE: usize>(depth: usize) -> (Sender<BUFSIZE>, Rec
 mod tests {
     use super::*;
     use bytes::BufMut;
-    use nix;
-
     #[test]
     fn test_empty_recv() {
         let (_send, mut recv) = packet_queue::<256>(16);
 
         assert_eq!(recv.len(), 0);
-        assert!(!poll(recv.poll_fd()));
+        assert!(!poll(recv.readiness_source()));
 
         match recv.try_recv(new_buf(256)).unwrap_err() {
             TryRecvError::Empty(_) => (),
@@ -197,13 +194,13 @@ mod tests {
         send.try_send(&send_pkt).unwrap();
 
         assert_eq!(recv.len(), 1);
-        assert!(poll(recv.poll_fd()));
+        assert!(poll(recv.readiness_source()));
 
         let recv_pkt = recv.try_recv(new_buf(256)).unwrap();
         assert_eq!(recv_pkt, send_pkt);
 
         assert_eq!(recv.len(), 0);
-        assert!(!poll(recv.poll_fd()));
+        assert!(!poll(recv.readiness_source()));
 
         match recv.try_recv(new_buf(256)).unwrap_err() {
             TryRecvError::Empty(_) => (),
@@ -240,14 +237,14 @@ mod tests {
 
         for i in 0..16 {
             assert_eq!(recv.len(), 16 - i);
-            assert!(poll(recv.poll_fd()));
+            assert!(poll(recv.readiness_source()));
 
             let recv_pkt = recv.try_recv(new_buf(256)).unwrap();
             assert_eq!(recv_pkt, send_pkts.pop().unwrap());
         }
 
         assert_eq!(recv.len(), 0);
-        assert!(!poll(recv.poll_fd()));
+        assert!(!poll(recv.readiness_source()));
 
         match recv.try_recv(new_buf(256)).unwrap_err() {
             TryRecvError::Empty(_) => (),
@@ -265,8 +262,15 @@ mod tests {
         Packet::new(new_buf(size), 0)
     }
 
-    fn poll(fd: BorrowedFd<'_>) -> bool {
-        let mut pfd = nix::poll::PollFd::new(fd, nix::poll::PollFlags::POLLIN);
-        nix::poll::poll(std::slice::from_mut(&mut pfd), nix::poll::PollTimeout::ZERO).unwrap() > 0
+    fn poll(source: &crate::sys::ReadinessSource) -> bool {
+        crate::sys::wait_for_readiness(
+            [crate::sys::ReadinessRequest {
+                source,
+                interest: crate::sys::ReadinessInterest::new(true, false),
+            }],
+            Some(0),
+        )
+        .unwrap()[0]
+            .readable
     }
 }

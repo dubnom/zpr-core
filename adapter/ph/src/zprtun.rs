@@ -20,4 +20,5 @@ pub enum ZprTunError {
 }
 
 /// TRUE if the platform TUN implementation supports per-packet packet info.
+#[allow(dead_code)]
 pub const TUN_HAS_PI: bool = TunPi::PI_SIZE > 0;

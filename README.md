@@ -13,6 +13,15 @@ We are currently working towards Milestone 6.
   secure enrollment-to-runtime credential issuance/handoff and live traffic
   certification remain pending. The separate [Mac enrollment app](../zpr-visaservice/zpr-dashboard/README.md#mac-enrollment-app-and-adapter-validation-development)
   keeps its identity in the user's Keychain and does not export it to the daemon.
+- The adapter workflow now defines an Apple Silicon macOS unit/build/package
+  job that uploads an unsigned development package for one day. Its first CI
+  run is still pending; this does not establish signed distribution or packet
+  flow certification.
+- The adapter workflow now defines an iOS arm64 job that builds only the Rust
+  `ph` library against the exact `zpr-ext` commit pinned in `Cargo.toml`; its
+  first run is pending. It does not produce an iOS app, framework, or Network
+  Extension package. The extension host, FFI runtime, entitlements, and
+  app-group setup remain unimplemented.
 - An explicitly authorized [Mac utun lifecycle smoke](integration-test/macos-utun-smoke.sh)
   now passes on Apple Silicon, including MTU/IPv6 aliases and repeated teardown.
   It leaves existing interfaces/default routes/DNS unchanged and is not a

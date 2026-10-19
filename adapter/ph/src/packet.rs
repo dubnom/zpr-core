@@ -724,7 +724,10 @@ impl Eq for Packet {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(windows))]
     use crate::config;
+    #[cfg(windows)]
+    use crate::defs as config;
     use bytes::{Buf, BufMut};
 
     #[test]

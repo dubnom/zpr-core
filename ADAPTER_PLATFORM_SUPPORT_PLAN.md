@@ -130,8 +130,15 @@ issuance/handoff, Developer ID signing/notarization, route/sleep lifecycle and
 real ZPR packet-flow validation remain release gates; see
 [`packaging/macos/README.md`](packaging/macos/README.md).
 
-- Add macOS CI for compilation, unit tests, and a permission-gated utun smoke
-  test; distinguish simulator/build checks from real packet-flow tests.
+**CI build/package, 2026-10-18:** `.github/workflows/adapter.yml` now defines
+an Apple Silicon macOS job that runs the `ph` and `ph-cli` unit tests, builds
+the unsigned development package, checks the arm64 binaries and CLI help, and
+uploads the package for one day. Its first GitHub Actions run is still pending.
+It does not install or sign the package, run the privileged utun smoke, or
+validate packet forwarding.
+
+- Add a permission-gated utun smoke test to CI where runner authorization is
+  safe and explicit; distinguish native interface checks from packet-flow tests.
 - Test IPv6 address lifecycle, route setup, MTU, sleep/wake, adapter shutdown,
   and reconnect. Document the current single-queue limitation until a tested
   multi-queue design exists.
@@ -191,6 +198,17 @@ connection on iOS until the Network Extension host can guarantee that traffic is
 routed through the tunnel; it must not silently fall back to the physical
 interface. The iOS-target tests compile but require a native iOS test host to
 execute.
+
+**Dependency and library build, 2026-10-18:** Core now pins `zpr-ext` to exact
+upstream commit `7dfee1cb41a13c6cbf7f350eb436009a99c22c0b`, which adds the
+missing iOS socket cfgs not present in `zpr-ext-v0.5.3`. Locked
+`cargo check --package ph --target aarch64-apple-ios` and a release
+`cargo build --package ph --lib --target aarch64-apple-ios` pass locally. CI
+now defines the same Rust-library build; its first run is pending. A full iOS
+binary link currently fails in AWS-LC with undefined `___chkstk_darwin` on this
+Xcode 27 host, so no executable/package claim is made. The library build is an
+`rlib`, not a Swift-callable framework or app. Network Extension host/FFI,
+packet-flow integration, entitlements, and app-group packaging remain absent.
 
 ### 6. Release Gates
 

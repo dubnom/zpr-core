@@ -8,7 +8,10 @@ use tokio_tun::{Tun, TunBuilder};
 // TODO: This logging is used to debug the use of local commands for TUN address management. Remove once we use syscalls.
 use tracing::*;
 
+use crate::batch_io::BatchIo;
 use crate::logging::targets::NET_OS;
+use crate::packet::Packet;
+use crate::sys::{PacketDevice, ReadinessSource};
 use crate::zprtun::ZprTunError;
 
 const COMMAND_IP: &str = "/usr/sbin/ip";
@@ -214,5 +217,33 @@ impl AsFd for ZprTun {
 impl AsRawFd for ZprTun {
     fn as_raw_fd(&self) -> RawFd {
         self.owned_fd.as_raw_fd()
+    }
+}
+
+impl PacketDevice for ZprTun {
+    fn readiness_source(&self) -> Result<ReadinessSource> {
+        ReadinessSource::from_fd(self)
+    }
+
+    fn packet_info_size(&self) -> usize {
+        crate::sys::TunPi::PI_SIZE
+    }
+
+    fn read_packets(
+        &self,
+        batch_io: &mut BatchIo,
+        packets: &mut [Packet],
+        results: &mut Vec<Result<usize>>,
+    ) -> Result<usize> {
+        batch_io.try_read_buf_batch(self, packets.iter_mut(), results)
+    }
+
+    fn write_packets(
+        &self,
+        batch_io: &mut BatchIo,
+        packets: &[Packet],
+        results: &mut Vec<Result<usize>>,
+    ) -> Result<usize> {
+        batch_io.try_write_batch(self, packets.iter().map(Packet::body), results)
     }
 }

@@ -24,7 +24,7 @@ use crate::main_args::{ArgsError, CommonArgs};
 pub const MAX_ACTIVE_LINKS: usize = 1024;
 
 /// Size of a packet buffer.
-pub const PACKET_BUFFER_SIZE: usize = 4096 * 3;
+pub use crate::defs::PACKET_BUFFER_SIZE;
 
 /// Size of a "small" packet buffer, suitable for most outbound management traffic.
 pub const SMALL_PACKET_BUFFER_SIZE: usize = 2048;

@@ -2,7 +2,8 @@
 //!
 //! Useful to signal events to a thread which is using `poll(2)`.
 
-use nix::{errno, fcntl, ioctl_read_bad, libc, poll, unistd};
+use super::readiness::{ReadinessInterest, ReadinessRequest, ReadinessSource};
+use nix::{errno, fcntl, ioctl_read_bad, libc, unistd};
 use std::io::Result;
 use std::mem::MaybeUninit;
 use std::os::fd::*;
@@ -20,6 +21,7 @@ ioctl_read_bad!(ioctl_fionread, libc::FIONREAD, libc::c_int);
 pub struct Notify {
     reader: OwnedFd,
     writer: OwnedFd,
+    readiness_source: ReadinessSource,
 }
 
 fn map_nix_err(errno: errno::Errno) -> std::io::Error {
@@ -49,16 +51,17 @@ impl Notify {
 
         set_nonblocking(&reader)?;
         set_nonblocking(&writer)?;
+        let readiness_source = ReadinessSource::from_fd(&reader)?;
 
-        Ok(Self { reader, writer })
+        Ok(Self {
+            reader,
+            writer,
+            readiness_source,
+        })
     }
 
-    /// Returns a reference to an FD which can be used to poll for events (using POLLIN).
-    ///
-    /// If an event is reported, `consume()` must be used to check for and consume
-    /// notifications.  (Else the notifications will stay put and re-trigger the poll event.)
-    pub fn poll_fd(&self) -> BorrowedFd<'_> {
-        self.reader.as_fd()
+    pub fn readiness_source(&self) -> &ReadinessSource {
+        &self.readiness_source
     }
 
     /// Post a notification.
@@ -120,19 +123,17 @@ impl Notify {
     /// Wait for a notification to be present, and consume it.
     #[allow(dead_code)]
     pub fn wait_and_consume(&self) {
-        let mut pollfd = poll::PollFd::new(self.poll_fd(), poll::PollFlags::POLLIN);
-
         loop {
-            match poll::poll(std::slice::from_mut(&mut pollfd), poll::PollTimeout::NONE) {
-                Ok(_) => {
-                    if pollfd.any().unwrap() && self.consume() {
-                        break;
-                    }
-                }
-
-                Err(errno::Errno::EINTR) => (),
-
-                Err(err) => panic!("Unexpected error: {err}"),
+            let events = super::readiness::wait(
+                [ReadinessRequest {
+                    source: &self.readiness_source,
+                    interest: ReadinessInterest::new(true, false),
+                }],
+                None,
+            )
+            .expect("Unexpected readiness error");
+            if events[0].readable && self.consume() {
+                break;
             }
         }
     }
@@ -141,7 +142,6 @@ impl Notify {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nix::poll;
     use std::sync::Arc;
 
     #[test]
@@ -180,20 +180,27 @@ mod tests {
 
         notify1.post();
 
-        let mut pollfd2 = poll::PollFd::new(notify2.poll_fd(), poll::PollFlags::POLLIN);
-        assert_eq!(
-            poll::poll(std::slice::from_mut(&mut pollfd2), 5000u16).unwrap(),
-            1
-        );
-
-        assert!(pollfd2.any().unwrap());
+        let events = super::super::readiness::wait(
+            [ReadinessRequest {
+                source: notify2.readiness_source(),
+                interest: ReadinessInterest::new(true, false),
+            }],
+            Some(5000),
+        )
+        .unwrap();
+        assert!(events[0].readable);
         assert!(notify2.consume());
         assert!(!notify2.consume());
 
-        assert_eq!(
-            poll::poll(std::slice::from_mut(&mut pollfd2), 0u16).unwrap(),
-            0
-        );
+        let events = super::super::readiness::wait(
+            [ReadinessRequest {
+                source: notify2.readiness_source(),
+                interest: ReadinessInterest::new(true, false),
+            }],
+            Some(0),
+        )
+        .unwrap();
+        assert!(!events[0].readable);
 
         th.join().unwrap();
     }

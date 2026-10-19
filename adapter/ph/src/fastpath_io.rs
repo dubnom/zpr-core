@@ -3,11 +3,9 @@ use crate::config;
 use crate::counters::*;
 use crate::fastpath::{FastpathWorker, FastpathWorkerConfig};
 use crate::packet_queue;
-use crate::sys::{TunPi, ZprTun};
-use crate::zprtun;
+use crate::sys::{PacketDevice, ReadinessSource, TunPi};
 use std::io::{ErrorKind, Result};
 use std::net::{SocketAddr, UdpSocket};
-use std::os::fd::{AsFd, BorrowedFd};
 use std::sync::Arc;
 use zpr_utils::net_defs;
 
@@ -16,8 +14,10 @@ use crate::packet::{self, Packet, flags};
 
 pub struct FastpathIo {
     batch_io: BatchIo,
-    actor_tun: Arc<ZprTun>,
+    actor_tun: Arc<dyn PacketDevice>,
+    actor_tun_readiness: ReadinessSource,
     substrate_socket: UdpSocket,
+    substrate_readiness: ReadinessSource,
     pub requeue_outq: packet_queue::Receiver<{ config::PACKET_BUFFER_SIZE }>,
     pub mgmt_substrate_outq: packet_queue::Receiver<{ config::PACKET_BUFFER_SIZE }>,
 
@@ -33,10 +33,10 @@ impl FastpathIo {
     pub fn new(
         config: FastpathWorkerConfig,
         substrate_socket: UdpSocket,
-        actor_tun: Arc<ZprTun>,
+        actor_tun: Arc<dyn PacketDevice>,
         requeue_outq: packet_queue::Receiver<{ config::PACKET_BUFFER_SIZE }>,
         maybe_mgmt_substrate_outq: Option<packet_queue::Receiver<{ config::PACKET_BUFFER_SIZE }>>,
-    ) -> Self {
+    ) -> Result<Self> {
         // HACK: nix does not support disabling an FD, so instead, make a dummy mgmt_substrate_outq socket
         // if we weren't given one
         let mgmt_substrate_outq;
@@ -48,39 +48,40 @@ impl FastpathIo {
             }
         }
 
-        Self {
+        let substrate_readiness = crate::sys::readiness_source_for_socket(&substrate_socket)?;
+        let actor_tun_readiness = actor_tun.readiness_source()?;
+
+        Ok(Self {
             batch_io: config
                 .batch_io_engine
                 .instantiate(config.batch_size)
                 .unwrap(),
             actor_tun,
+            actor_tun_readiness,
             substrate_socket,
+            substrate_readiness,
             requeue_outq,
             mgmt_substrate_outq,
             packets: Vec::with_capacity(config.batch_size),
             io_results: Vec::with_capacity(config.batch_size),
             recv_results: Vec::with_capacity(config.batch_size),
-        }
+        })
     }
 
-    /// Substrate socket FD for polling.
-    pub fn substrate_socket_fd(&self) -> BorrowedFd<'_> {
-        self.substrate_socket.as_fd()
+    pub fn substrate_readiness(&self) -> &ReadinessSource {
+        &self.substrate_readiness
     }
 
-    /// Actor TUN FD for polling.
-    pub fn actor_tun_fd(&self) -> BorrowedFd<'_> {
-        self.actor_tun.as_fd()
+    pub fn actor_tun_readiness(&self) -> &ReadinessSource {
+        &self.actor_tun_readiness
     }
 
-    /// Requeue socket FD for polling.
-    pub fn requeue_fd(&self) -> BorrowedFd<'_> {
-        self.requeue_outq.poll_fd()
+    pub fn requeue_readiness(&self) -> &ReadinessSource {
+        self.requeue_outq.readiness_source()
     }
 
-    /// Mgmt substrate FD for polling.
-    pub fn mgmt_substrate_fd(&self) -> BorrowedFd<'_> {
-        self.mgmt_substrate_outq.poll_fd()
+    pub fn mgmt_substrate_readiness(&self) -> &ReadinessSource {
+        self.mgmt_substrate_outq.readiness_source()
     }
 
     /// Process an input-ready notification on the substrate socket (substrate ingress).
@@ -156,12 +157,8 @@ impl FastpathIo {
 
         self.io_results.clear();
         let n = self
-            .batch_io
-            .try_read_buf_batch(
-                &self.actor_tun,
-                self.packets.iter_mut(),
-                &mut self.io_results,
-            )
+            .actor_tun
+            .read_packets(&mut self.batch_io, &mut self.packets, &mut self.io_results)
             .unwrap();
 
         // return empty buffers to pool
@@ -182,7 +179,7 @@ impl FastpathIo {
                 }
             }
 
-            if zprtun::TUN_HAS_PI {
+            if self.actor_tun.packet_info_size() > 0 {
                 let pi = TunPi::read_pi(&mut pkt);
                 if pi.strip || !is_ip(pi) {
                     // packet was too large or non-IP; drop
@@ -240,7 +237,7 @@ impl FastpathIo {
     /// Egress queued actor input packets only.
     fn process_actor_input_queue(&mut self, worker: &mut FastpathWorker) {
         // Add TUN PI header.
-        match TunPi::PI_SIZE {
+        match self.actor_tun.packet_info_size() {
             0 => (),
             sz => {
                 for pkt in &mut worker.actor_input_q {
@@ -260,10 +257,10 @@ impl FastpathIo {
         // (Try to) send packets.
         self.io_results.clear();
         let n = self
-            .batch_io
-            .try_write_batch(
-                &self.actor_tun.as_fd(),
-                worker.actor_input_q.iter().map(|pkt| pkt.body()),
+            .actor_tun
+            .write_packets(
+                &mut self.batch_io,
+                &worker.actor_input_q,
                 &mut self.io_results,
             )
             .expect("unrecoverable TUN error");
@@ -404,5 +401,120 @@ fn batch_process_packet_queue(
                 panic!("unrecoverable I/O error {err:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::batch_io;
+    use crate::sys::{ReadinessInterest, ReadinessRequest, notify::Notify, wait_for_readiness};
+    use bytes::BufMut;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    struct FakePacketDevice {
+        notify: Notify,
+        incoming: Mutex<VecDeque<Vec<u8>>>,
+        outgoing: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl FakePacketDevice {
+        fn new(incoming: impl IntoIterator<Item = Vec<u8>>) -> Self {
+            Self {
+                notify: Notify::new().unwrap(),
+                incoming: Mutex::new(incoming.into_iter().collect()),
+                outgoing: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl PacketDevice for FakePacketDevice {
+        fn readiness_source(&self) -> Result<ReadinessSource> {
+            Ok(self.notify.readiness_source().clone())
+        }
+
+        fn packet_info_size(&self) -> usize {
+            0
+        }
+
+        fn read_packets(
+            &self,
+            _batch_io: &mut BatchIo,
+            packets: &mut [Packet],
+            results: &mut Vec<Result<usize>>,
+        ) -> Result<usize> {
+            let mut incoming = self.incoming.lock().unwrap();
+            let mut count = 0;
+            for (packet, contents) in packets.iter_mut().zip(incoming.drain(..)) {
+                packet.put_slice(&contents);
+                results.push(Ok(contents.len()));
+                count += 1;
+            }
+            Ok(count)
+        }
+
+        fn write_packets(
+            &self,
+            _batch_io: &mut BatchIo,
+            packets: &[Packet],
+            results: &mut Vec<Result<usize>>,
+        ) -> Result<usize> {
+            let mut outgoing = self.outgoing.lock().unwrap();
+            for packet in packets {
+                let contents = packet.body().to_vec();
+                results.push(Ok(contents.len()));
+                outgoing.push(contents);
+            }
+            Ok(packets.len())
+        }
+    }
+
+    fn packet() -> Packet {
+        Packet::new(vec![0; 128].into_boxed_slice(), 0)
+    }
+
+    #[test]
+    fn fake_packet_device_uses_opaque_packet_and_readiness_contracts() {
+        let device = FakePacketDevice::new([b"inbound".to_vec()]);
+        let source = device.readiness_source().unwrap();
+        let mut batch_io = batch_io::auto_select_engine().instantiate(4).unwrap();
+        let mut packets = vec![packet(), packet()];
+        let mut results = Vec::new();
+
+        device.notify.post();
+        assert!(
+            wait_for_readiness(
+                [ReadinessRequest {
+                    source: &source,
+                    interest: ReadinessInterest::new(true, false),
+                }],
+                Some(1000),
+            )
+            .unwrap()[0]
+                .readable
+        );
+
+        assert_eq!(
+            device
+                .read_packets(&mut batch_io, &mut packets, &mut results)
+                .unwrap(),
+            1
+        );
+        assert_eq!(packets[0].body(), b"inbound");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].as_ref().unwrap(), &7);
+
+        results.clear();
+        assert_eq!(
+            device
+                .write_packets(&mut batch_io, &packets[..1], &mut results)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            device.outgoing.lock().unwrap().as_slice(),
+            &[b"inbound".to_vec()]
+        );
     }
 }

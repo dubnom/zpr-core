@@ -3,7 +3,7 @@
 //! The main entry point is [crate::main_argparse::argparse] which will parse the command line arguments
 //! and any config file, returning a PH configuration.
 
-#[cfg(not(feature = "complete"))]
+#[cfg(all(not(feature = "complete"), not(windows)))]
 use crate::auth::AuthError;
 use crate::batch_io;
 use crate::logging::{levels, targets};
@@ -14,7 +14,7 @@ use std::str::FromStr;
 
 /// Errors you may encounter when trying to parse command line or configuration
 /// file.
-#[cfg(not(feature = "complete"))]
+#[cfg(all(not(feature = "complete"), not(windows)))]
 #[derive(thiserror::Error, Debug)]
 pub enum ArgsError {
     #[error("missing argument: {0}")]

@@ -4,8 +4,11 @@ use std::os::fd::{AsFd, BorrowedFd};
 // TODO: This logging is used to debug the use of local commands for TUN address management. Remove once we use syscalls.
 use tracing::*;
 
+use crate::batch_io::BatchIo;
 use crate::logging::targets::NET_OS;
+use crate::packet::Packet;
 use crate::sys::macos::tun;
+use crate::sys::{PacketDevice, ReadinessSource};
 use crate::zprtun::ZprTunError;
 use std::process::Command;
 
@@ -205,6 +208,34 @@ fn ifconfig_has_address(output: &str, address: IpAddr) -> bool {
 impl AsFd for ZprTun {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.inner.as_fd()
+    }
+}
+
+impl PacketDevice for ZprTun {
+    fn readiness_source(&self) -> std::io::Result<ReadinessSource> {
+        ReadinessSource::from_fd(self)
+    }
+
+    fn packet_info_size(&self) -> usize {
+        crate::sys::TunPi::PI_SIZE
+    }
+
+    fn read_packets(
+        &self,
+        batch_io: &mut BatchIo,
+        packets: &mut [Packet],
+        results: &mut Vec<std::io::Result<usize>>,
+    ) -> std::io::Result<usize> {
+        batch_io.try_read_buf_batch(self, packets.iter_mut(), results)
+    }
+
+    fn write_packets(
+        &self,
+        batch_io: &mut BatchIo,
+        packets: &[Packet],
+        results: &mut Vec<std::io::Result<usize>>,
+    ) -> std::io::Result<usize> {
+        batch_io.try_write_batch(self, packets.iter().map(Packet::body), results)
     }
 }
 
