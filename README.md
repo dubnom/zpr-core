@@ -42,6 +42,13 @@ To run the ZPRnet you need at least:
 * If you do not have a compiled policy you need the ZPL compiler (called `zplc`)
   * In the [zpr-compiler repo](https://github.com/org-zpr/zpr-compiler)
 
+## Linux x86_64 adapter CI artifact
+
+The `Rust-adapter` workflow builds locked release binaries for `ph` and
+`ph-cli`, checks their ELF64/x86_64 architecture, and runs their help commands
+without starting services. It uploads a checksummed CI-only archive for one day.
+This build check does not install a tunnel, exercise packet flow, or certify
+adapter support.
 
 ## How to setup a ZPRnet
 
@@ -414,4 +421,3 @@ visa-service traffic is not routed to it.
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in ZPR by you, shall be licensed as Apache 2.0, without any additional
 terms or conditions.
-

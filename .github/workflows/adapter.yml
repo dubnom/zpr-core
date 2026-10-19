@@ -89,6 +89,68 @@ jobs:
       needs-capnp: true
     secrets: inherit
 
+  linux-x86_64-release:
+    name: Linux x86_64 release binaries
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        token: ${{ secrets.ZPR_CICD_RO_TOKEN }}
+        submodules: 'true'
+    - run: rustup toolchain install stable --profile minimal
+    - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+      with:
+        workspaces: |
+          adapter/ph
+          adapter/cli
+          zpr-ext
+          cslab
+          cbpf-rs
+    - name: Setup Git credentials
+      timeout-minutes: 1
+      run: |
+        echo 'echo $ZPR_CICD_RO_TOKEN' > "$HOME/.git-askpass"
+        chmod +x "$HOME/.git-askpass"
+        echo "GIT_ASKPASS=$HOME/.git-askpass" >> "$GITHUB_ENV"
+    - name: Install Linux build dependencies
+      timeout-minutes: 5
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y capnproto libpcap-dev
+    - name: Build locked release binaries
+      timeout-minutes: 20
+      env:
+        ZPR_CICD_RO_TOKEN: ${{ secrets.ZPR_CICD_RO_TOKEN }}
+      run: cargo build --locked --release --package ph --package ph-cli
+    - name: Verify Linux x86_64 binaries
+      run: |
+        test "$(uname -s)" = Linux
+        test "$(uname -m)" = x86_64
+        for binary in ph ph-cli; do
+          path="target/release/$binary"
+          test -x "$path"
+          readelf -h "$path" | grep -Eq 'Class:[[:space:]]+ELF64$'
+          readelf -h "$path" | grep -Eq 'Machine:[[:space:]]+Advanced Micro Devices X86-64$'
+        done
+        target/release/ph adapter --help >/dev/null
+        target/release/ph-cli --help >/dev/null
+    - name: Package CI-only binaries
+      run: |
+        mkdir -p dist-linux-x86_64
+        install -m 0755 target/release/ph target/release/ph-cli dist-linux-x86_64/
+        (
+          cd dist-linux-x86_64
+          sha256sum ph ph-cli > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          tar -czf "$GITHUB_WORKSPACE/ph-adapters-linux-x86_64.tar.gz" ph ph-cli SHA256SUMS
+        )
+        tar -tzf ph-adapters-linux-x86_64.tar.gz
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ph-adapters-linux-x86_64
+        path: ph-adapters-linux-x86_64.tar.gz
+        retention-days: 1
+
   # Integration tests
   basic-integration-test:
     name: Run 1-Node Test (v6)
