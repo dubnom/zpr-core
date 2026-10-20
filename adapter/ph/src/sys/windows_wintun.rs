@@ -173,7 +173,11 @@ impl Session {
         self.read_wait_event
     }
 
-    fn read_packets(&self, packets: &mut [Packet], results: &mut Vec<io::Result<usize>>) -> usize {
+    pub(crate) fn read_packets(
+        &self,
+        packets: &mut [Packet],
+        results: &mut Vec<io::Result<usize>>,
+    ) -> usize {
         let mut count = 0;
         for packet in packets {
             let raw_packet = match self.session.adapter.api.receive_packet(self.session.handle) {
@@ -217,7 +221,11 @@ impl Session {
         count
     }
 
-    fn write_packets(&self, packets: &[Packet], results: &mut Vec<io::Result<usize>>) -> usize {
+    pub(crate) fn write_packets(
+        &self,
+        packets: &[Packet],
+        results: &mut Vec<io::Result<usize>>,
+    ) -> usize {
         let mut count = 0;
         for packet in packets {
             let contents = packet.body();
