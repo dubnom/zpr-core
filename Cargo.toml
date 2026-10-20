@@ -34,7 +34,7 @@ zpr-utils = { git = "https://github.com/org-zpr/zpr-utils.git", tag = "zpr-utils
 panic = "abort"
 
 [patch.crates-io]
-capnp = { git = "https://github.com/emilazy/capnproto-rust.git", rev = "cfbcb9b" }
-capnp-futures = { git = "https://github.com/emilazy/capnproto-rust.git", rev = "cfbcb9b" }
-capnp-rpc = { git = "https://github.com/emilazy/capnproto-rust.git", rev = "cfbcb9b" }
-capnpc = { git = "https://github.com/emilazy/capnproto-rust.git", rev = "cfbcb9b" }
+capnp = { path = "vendor/capnproto-rust/capnp" }
+capnp-futures = { path = "vendor/capnproto-rust/capnp-futures" }
+capnp-rpc = { path = "vendor/capnproto-rust/capnp-rpc" }
+capnpc = { path = "vendor/capnproto-rust/capnpc" }

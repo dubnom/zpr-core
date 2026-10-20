@@ -156,6 +156,49 @@ jobs:
       needs-capnp: true
     secrets: inherit
 
+  windows-msvc-ph:
+    name: PH Windows x86-64 MSVC check and Wintun fake tests
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Install stable Rust and Windows target
+      shell: pwsh
+      run: |
+        rustup toolchain install stable --profile minimal
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        rustup default stable
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        rustup target add x86_64-pc-windows-msvc
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    - name: Configure Git askpass for private Cargo dependencies
+      shell: pwsh
+      run: |
+        $askpass = Join-Path $env:RUNNER_TEMP 'git-askpass.cmd'
+        Set-Content -Path $askpass -Value @('@echo off', 'echo %ZPR_CICD_RO_TOKEN%') -Encoding ascii
+        "GIT_ASKPASS=$askpass" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+    - name: Run native Windows MSVC gate
+      shell: cmd
+      env:
+        ZPR_CICD_RO_TOKEN: ${{ secrets.ZPR_CICD_RO_TOKEN }}
+      run: |
+        set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+        if not exist "%VSWHERE%" (
+          echo Visual Studio Locator was not found. 1>&2
+          exit /b 1
+        )
+        for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+        if not defined VSINSTALL (
+          echo Visual Studio C++ x86/x64 build tools were not found. 1>&2
+          exit /b 1
+        )
+        call "%VSINSTALL%\Common7\Tools\VsDevCmd.bat" -arch=amd64
+        if errorlevel 1 exit /b 1
+        powershell -NoProfile -File adapter/ph/check-windows-msvc.ps1
+
   # Test ph-cli, check for warnings, and check formatting
   test-ph-cli:
     name: PH CLI

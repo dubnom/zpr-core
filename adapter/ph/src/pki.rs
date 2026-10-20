@@ -345,11 +345,46 @@ n5ystfC9RDOzkrR8ICLvoWBQ52ctmNH3oWs1p1DT3uL6k3QMnNlejIkUqAY51aI=
         assert_eq!(cn, "foo.zpr".to_string());
     }
 
-    const TEST_X25519_PRIV_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VuBCIEINjp9Br1Ykn9R6D2sCUkOUMJKSEZXMX5JPR65vb6+yl6\n-----END PRIVATE KEY-----\n";
-    const TEST_X25519_PUB_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VuAyEAFlTnsuk9He+ISGuIRgE37erOxcR3HhV3fFJt4NSyUH4=\n-----END PUBLIC KEY-----\n";
+    fn generated_noise_key_pems() -> (String, String) {
+        use x509_cert::der::asn1::OctetString;
+
+        let keypair = NoiseKeypair::generate();
+        let encoded_private_key = OctetString::new(keypair.private.to_vec())
+            .unwrap()
+            .to_der()
+            .unwrap();
+        let private_key_info = pkcs8::PrivateKeyInfoOwned::new(
+            AlgorithmIdentifierOwned {
+                oid: OID_X25519,
+                parameters: None,
+            },
+            OctetString::new(encoded_private_key).unwrap(),
+        );
+        let private_pem = pem::encode_string(
+            "PRIVATE KEY",
+            LineEnding::LF,
+            &private_key_info.to_der().unwrap(),
+        )
+        .unwrap();
+        let public_key_info = SubjectPublicKeyInfoOwned {
+            algorithm: AlgorithmIdentifierOwned {
+                oid: OID_X25519,
+                parameters: None,
+            },
+            subject_public_key: BitString::from_bytes(&keypair.public).unwrap(),
+        };
+        let public_pem = pem::encode_string(
+            "PUBLIC KEY",
+            LineEnding::LF,
+            &public_key_info.to_der().unwrap(),
+        )
+        .unwrap();
+
+        (private_pem, public_pem)
+    }
 
     fn write_temp(name: &str, contents: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(name);
+        let path = std::env::temp_dir().join(format!("{name}.{}", std::process::id()));
         std::fs::write(&path, contents).unwrap();
         path
     }
@@ -358,8 +393,9 @@ n5ystfC9RDOzkrR8ICLvoWBQ52ctmNH3oWs1p1DT3uL6k3QMnNlejIkUqAY51aI=
     fn test_load_noise_keys_roundtrip() {
         use crate::km_noise::derive_public_key;
 
-        let priv_path = write_temp("zpr_test_noise_priv.pem", TEST_X25519_PRIV_PEM);
-        let pub_path = write_temp("zpr_test_noise_pub.pem", TEST_X25519_PUB_PEM);
+        let (private_pem, public_pem) = generated_noise_key_pems();
+        let priv_path = write_temp("zpr_test_noise_priv.pem", &private_pem);
+        let pub_path = write_temp("zpr_test_noise_pub.pem", &public_pem);
 
         let priv_key = load_noise_private_key(&priv_path).unwrap();
         let pub_key = load_noise_public_key(&pub_path).unwrap();

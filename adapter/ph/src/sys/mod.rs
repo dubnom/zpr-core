@@ -28,6 +28,8 @@ pub(crate) mod packet_fd;
 pub(crate) mod posix;
 #[cfg(windows)]
 pub(crate) mod windows;
+#[cfg(any(windows, test))]
+mod windows_wintun;
 
 #[cfg(unix)]
 pub use self::posix::notify;

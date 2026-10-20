@@ -1,0 +1,63 @@
+[package]
+
+name = "capnp-futures"
+version = "0.25.2"
+workspace = ".."
+authors = [ "David Renshaw <drenshaw@gmail.com>" ]
+license = "MIT"
+
+description = "async serialization for Cap'n Proto messages"
+repository = "https://github.com/dwrensha/capnproto-rust"
+documentation = "https://docs.rs/capnp-futures/"
+edition = "2021"
+
+keywords = ["async"]
+
+[dependencies]
+capnp = { version = "0.25.0", path = "../capnp" }
+
+[dependencies.futures-channel]
+version = "0.3.0"
+default-features = false
+features = ["std"]
+
+[dependencies.futures-core]
+version = "0.3.0"
+default-features = false
+features = ["std"]
+
+[dependencies.futures-io]
+version = "0.3.0"
+default-features = false
+features = ["std"]
+optional = true
+
+[dependencies.rustix]
+version = "1.1.4"
+default-features = false
+features = ["std", "net"]
+optional = true
+
+[dependencies.tokio]
+version = "1.52.3"
+default-features = false
+features = ["net"]
+optional = true
+
+[dev-dependencies.futures]
+version = "0.3.0"
+default-features = false
+features = ["executor"]
+
+[dev-dependencies]
+capnp = { version = "0.25.0", path = "../capnp", features = ["quickcheck"] }
+quickcheck = "1"
+
+[features]
+default = ["futures-io"]
+futures-io = ["dep:futures-io"]
+tokio = ["dep:tokio"]
+tokio-unix-fd-stream = ["tokio", "dep:rustix"]
+
+[lints]
+workspace = true

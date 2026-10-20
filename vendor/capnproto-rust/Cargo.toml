@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["capnp", "capnp-futures", "capnp-rpc", "capnpc"]
+default-members = ["capnp", "capnpc"]
+
+[workspace.package]
+rust-version = "1.81.0"
+
+[workspace.lints.rust]
+unreachable_pub = "deny"
+
+[workspace.lints.clippy]
+type_complexity = "allow"
+missing_safety_doc = "allow"

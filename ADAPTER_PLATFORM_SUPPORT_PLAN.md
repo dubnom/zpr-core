@@ -19,7 +19,8 @@ or UI.
   IPv6 address management only; named interfaces must use the `utunN` form.
   Native Apple Silicon compilation/unit validation now passes locally; see
   the October 7 progress below. This is not connected-adapter certification.
-- Windows has no `ph` system/TUN backend.
+- Windows now has an unvalidated Wintun packet-device source slice that opens
+  an existing adapter; no Windows package or complete `ph` runtime is available.
 - Android and iOS have no `ph` platform integration. Android-specific packet
   steering conditionals are not, by themselves, a working Android adapter.
 
@@ -147,13 +148,47 @@ validate packet forwarding.
 
 ### 3. Implement Windows
 
-- Add a Wintun-backed packet-device implementation and Windows-specific
-  interface/address/route management.
+- **Source slice, 2026-10-20:** `ph` can open an already-created Wintun adapter
+  and session, read/write packets, and close the session/adapter through RAII.
+  It loads only an operator-supplied DLL specified by the absolute
+  `ZPR_WINTUN_DLL_PATH` and matching `ZPR_WINTUN_DLL_SHA256` settings; the
+  expected pin is checked before load, and the DLL remains locked against
+  concurrent write/delete while it is checked and loaded. Fake API tests cover
+  configuration validation, packet ownership, missing adapters, failed
+  startup cleanup, and shutdown. No real DLL is loaded by tests.
+- This source slice does not create/install/delete the Wintun driver or adapter,
+  configure addresses/routes/firewall, install a service, elevate, or provide
+  the Windows CLI/lifecycle package. Windows remains unsupported as a runnable
+  package. The compile/fake-test gate does not require or load a Wintun DLL.
+  Actual runtime remains blocked on an operator-managed DLL supplied from an
+  approved source, with version, license, expected SHA-256, code-signing
+  provenance, and deployment process reviewed; no DLL is distributed here.
+- Implement Windows-specific interface/address/route management only after
+  separate operator lifecycle and rollback approval.
 - Replace Unix local IPC and signal assumptions with named pipes or another
   authenticated local IPC mechanism. Define service installation, upgrade,
   privilege separation, firewall/kill-switch behavior, and clean uninstall.
 - Build and test on Windows x86-64 first; add Windows arm64 only after toolchain,
   Wintun, and package support are verified.
+- Run the local, non-privileged [Windows MSVC build gate](adapter/ph/check-windows-msvc.ps1)
+  from a native Visual Studio Developer PowerShell. It requires `cl.exe`,
+  `link.exe`, Windows SDK/CRT headers (`windows.h` and `stdlib.h`), the Windows
+  SDK `kernel32.lib`, and the `x86_64-pc-windows-msvc` Rust target already
+  installed. The script does not install tools or change host configuration;
+  it runs `cargo check -p ph --target x86_64-pc-windows-msvc` and
+  `cargo test -p ph --lib --target x86_64-pc-windows-msvc
+  sys::windows_wintun::tests` (all portable fake-backend tests; no real DLL
+  load). The `windows-msvc-ph` job in
+  [adapter.yml](.github/workflows/adapter.yml) runs this gate on `windows-2022`
+  after initializing the Visual Studio x64 environment and installing the Rust
+  target. The native CI outcome is pending; no Windows runner result has been
+  reported. The latest macOS cross-check stopped in `aws-lc-sys` before Rust
+  backend compilation because the Windows SDK/CRT headers `windows.h` and
+  `stdlib.h` were unavailable. Local macOS fake tests passed 8/8 but do not
+  establish Windows target compilation. A successful native gate establishes
+  target compilation and fake lifecycle-test success only—not DLL provenance,
+  driver or adapter installation, native packet flow, ZPR connectivity,
+  service lifecycle, or package/runtime acceptance.
 - Validate adapter bootstrap, ZPR link establishment, allowed/denied flows,
   visa revocation, reconnect, and service recovery in a Windows VM.
 

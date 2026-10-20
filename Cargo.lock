@@ -412,7 +412,6 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 [[package]]
 name = "capnp"
 version = "0.25.5"
-source = "git+https://github.com/emilazy/capnproto-rust.git?rev=cfbcb9b#cfbcb9bf2b620db96cffdfd4bb09af4837093bab"
 dependencies = [
  "embedded-io",
 ]
@@ -420,7 +419,6 @@ dependencies = [
 [[package]]
 name = "capnp-futures"
 version = "0.25.2"
-source = "git+https://github.com/emilazy/capnproto-rust.git?rev=cfbcb9b#cfbcb9bf2b620db96cffdfd4bb09af4837093bab"
 dependencies = [
  "capnp",
  "futures-channel",
@@ -433,7 +431,6 @@ dependencies = [
 [[package]]
 name = "capnp-rpc"
 version = "0.25.1"
-source = "git+https://github.com/emilazy/capnproto-rust.git?rev=cfbcb9b#cfbcb9bf2b620db96cffdfd4bb09af4837093bab"
 dependencies = [
  "capnp",
  "capnp-futures",
@@ -445,7 +442,6 @@ dependencies = [
 [[package]]
 name = "capnpc"
 version = "0.25.3"
-source = "git+https://github.com/emilazy/capnproto-rust.git?rev=cfbcb9b#cfbcb9bf2b620db96cffdfd4bb09af4837093bab"
 dependencies = [
  "capnp",
 ]
