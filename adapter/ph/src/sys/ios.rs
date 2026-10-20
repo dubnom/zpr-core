@@ -1,3 +1,5 @@
+#![cfg(any(target_os = "ios", all(test, unix)))]
+
 use crate::batch_io::BatchIo;
 use crate::packet::Packet;
 use crate::sys::TunPi;

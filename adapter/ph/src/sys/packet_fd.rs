@@ -1,3 +1,5 @@
+#![cfg(any(target_os = "ios", all(test, unix)))]
+
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
