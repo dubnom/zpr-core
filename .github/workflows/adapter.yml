@@ -122,18 +122,10 @@ jobs:
       env:
         ZPR_CICD_RO_TOKEN: ${{ secrets.ZPR_CICD_RO_TOKEN }}
       run: cargo build --locked --release --package ph --package ph-cli
-    - name: Verify Linux x86_64 binaries
+    - name: Verify Linux runner
       run: |
         test "$(uname -s)" = Linux
         test "$(uname -m)" = x86_64
-        for binary in ph ph-cli; do
-          path="target/release/$binary"
-          test -x "$path"
-          readelf -h "$path" | grep -Eq 'Class:[[:space:]]+ELF64$'
-          readelf -h "$path" | grep -Eq 'Machine:[[:space:]]+Advanced Micro Devices X86-64$'
-        done
-        target/release/ph adapter --help >/dev/null
-        target/release/ph-cli --help >/dev/null
     - name: Package CI-only binaries
       run: |
         mkdir -p dist-linux-x86_64
@@ -141,10 +133,10 @@ jobs:
         (
           cd dist-linux-x86_64
           sha256sum ph ph-cli > SHA256SUMS
-          sha256sum --check SHA256SUMS
           tar -czf "$GITHUB_WORKSPACE/ph-adapters-linux-x86_64.tar.gz" ph ph-cli SHA256SUMS
         )
-        tar -tzf ph-adapters-linux-x86_64.tar.gz
+        bash packaging/test-linux-x86_64-release-artifact.sh \
+          "$GITHUB_WORKSPACE/ph-adapters-linux-x86_64.tar.gz"
     - uses: actions/upload-artifact@v4
       with:
         name: ph-adapters-linux-x86_64
