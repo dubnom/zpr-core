@@ -20,3 +20,6 @@ pub mod packet;
 pub mod sys;
 #[cfg(windows)]
 pub mod zprtun;
+
+#[cfg(any(target_os = "ios", all(test, unix)))]
+pub mod ios_ffi;

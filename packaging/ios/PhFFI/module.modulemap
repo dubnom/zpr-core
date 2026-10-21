@@ -1,0 +1,4 @@
+module PhFFI {
+    header "../../../adapter/ph/include/ph_ios.h"
+    export *
+}

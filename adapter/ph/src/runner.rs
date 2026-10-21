@@ -6,6 +6,7 @@ use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::process;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
@@ -90,7 +91,7 @@ fn packet_buffer_socket_pair(
 
 /// Run the command-line PH process with its existing signal-driven lifecycle.
 pub fn run_cli() -> ExitCode {
-    run(None, None)
+    run(None, None, None, None)
 }
 
 /// Run PH using command-line arguments with a caller-controlled shutdown token.
@@ -98,10 +99,34 @@ pub fn run_cli() -> ExitCode {
 /// The caller should run this blocking function on a dedicated thread and
 /// cancel `stop` to request graceful peer shutdown followed by worker teardown.
 pub fn run_with_cancellation(args: Vec<String>, stop: CancellationToken) -> ExitCode {
-    run(Some(args), Some(stop))
+    run(Some(args), Some(stop), None, None)
 }
 
-fn run(args: Option<Vec<String>>, stop: Option<CancellationToken>) -> ExitCode {
+/// Run iOS adapter mode with a host-supplied packet-flow device.
+///
+/// `status` is set to 1 after the configured peer's security association is
+/// established and to 2 when the runner exits. Zero means startup is ongoing.
+#[cfg(target_os = "ios")]
+pub fn run_with_ios_packet_device(
+    args: Vec<String>,
+    stop: CancellationToken,
+    packet_device: ZprTun,
+    status: Arc<AtomicU8>,
+) -> ExitCode {
+    run(
+        Some(args),
+        Some(stop),
+        Some(packet_device),
+        Some(status),
+    )
+}
+
+fn run(
+    args: Option<Vec<String>>,
+    stop: Option<CancellationToken>,
+    host_packet_device: Option<ZprTun>,
+    host_status: Option<Arc<AtomicU8>>,
+) -> ExitCode {
     let system_start_time = std::time::Instant::now();
 
     //
@@ -119,6 +144,10 @@ fn run(args: Option<Vec<String>>, stop: Option<CancellationToken>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if host_packet_device.is_some() && !matches!(ph_mode, PhMode::Adapter) {
+        error!(target: STARTUP, "a host packet-flow device is supported only in adapter mode");
+        return ExitCode::FAILURE;
+    }
 
     //
     // set up logging
@@ -310,14 +339,26 @@ fn run(args: Option<Vec<String>>, stop: Option<CancellationToken>) -> ExitCode {
         }
     };
 
-    let tun_devs: Vec<_> = match ZprTun::new_mq(
-        config.tun_if.clone(),
-        topology_config.fastpath_concurrency,
-        tun_addr,
-    ) {
-        Ok(devs) => devs.into_iter().map(Arc::new).collect(),
-        Err(err) => {
-            panic!("unable to create TUN device: {err}");
+    let tun_devs: Vec<_> = if let Some(packet_device) = host_packet_device {
+        if topology_config.fastpath_concurrency != 1 {
+            error!(
+                target: STARTUP,
+                "a host packet-flow device requires exactly one fastpath worker"
+            );
+            return ExitCode::FAILURE;
+        }
+        vec![Arc::new(packet_device)]
+    } else {
+        match ZprTun::new_mq(
+            config.tun_if.clone(),
+            topology_config.fastpath_concurrency,
+            tun_addr,
+        ) {
+            Ok(devs) => devs.into_iter().map(Arc::new).collect(),
+            Err(err) => {
+                error!(target: STARTUP, "unable to create TUN device: {err}");
+                return ExitCode::FAILURE;
+            }
         }
     };
     let tun_interface_name = tun_devs[0].name().to_owned();
@@ -815,14 +856,26 @@ fn run(args: Option<Vec<String>>, stop: Option<CancellationToken>) -> ExitCode {
     //
 
     if ph_mode == PhMode::Adapter {
-        local_set.block_on(&runtime, async {
-            let dsid = DOCK_LINK_ID;
-            debug!(target: STARTUP, "waiting on security association establishment on {}", asm.formatted_link_id(dsid));
-            while !asm.peer_table.is_security_association_established(dsid) {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let startup_ready = local_set.block_on(
+            &runtime,
+            wait_for_security_association(&asm, stop.as_ref()),
+        );
+        if !startup_ready {
+            local_set.block_on(
+                &runtime,
+                shutdown_workers(&asm, fastpath_stop.clone(), &mut js),
+            );
+            for thread in fastpath_threads {
+                if thread.join().is_err() {
+                    error!(target: STARTUP, "fastpath worker panicked during startup cancellation");
+                    return ExitCode::FAILURE;
+                }
             }
-            debug!(target: STARTUP, "security association established successfully on {}", asm.formatted_link_id(dsid));
-        });
+            return ExitCode::SUCCESS;
+        }
+        if let Some(status) = &host_status {
+            status.store(1, Ordering::Release);
+        }
     }
 
     //
@@ -879,24 +932,7 @@ fn run(args: Option<Vec<String>>, stop: Option<CancellationToken>) -> ExitCode {
         if let Some(stop) = stop {
             tokio::select! {
                 _ = stop.cancelled() => {
-                    asm.tun_ctl.set_carrier(false).unwrap();
-                    if tokio::time::timeout(std::time::Duration::from_secs(5), asm.shutdown())
-                        .await
-                        .is_err()
-                    {
-                        warn!(target: STARTUP, "timed out waiting for PH peers to disconnect");
-                    }
-                    if let Some(fastpath_stop) = fastpath_stop {
-                        fastpath_stop.cancel();
-                    }
-                    js.abort_all();
-                    while let Some(result) = js.join_next().await {
-                        if let Err(error) = result
-                            && !error.is_cancelled()
-                        {
-                            error!(target: STARTUP, "worker failed during shutdown: {error}");
-                        }
-                    }
+                    shutdown_workers(&asm, fastpath_stop, &mut js).await;
                 }
                 result = async {
                     while let Some(result) = js.join_next().await {
@@ -918,4 +954,60 @@ fn run(args: Option<Vec<String>>, stop: Option<CancellationToken>) -> ExitCode {
     info!(target: STARTUP, "exiting");
 
     ExitCode::SUCCESS
+}
+
+async fn wait_for_security_association(
+    asm: &Arc<Assembly>,
+    stop: Option<&CancellationToken>,
+) -> bool {
+    let dsid = DOCK_LINK_ID;
+    debug!(
+        target: STARTUP,
+        "waiting on security association establishment on {}",
+        asm.formatted_link_id(dsid)
+    );
+    loop {
+        if asm.peer_table.is_security_association_established(dsid) {
+            debug!(
+                target: STARTUP,
+                "security association established successfully on {}",
+                asm.formatted_link_id(dsid)
+            );
+            return true;
+        }
+
+        if let Some(stop) = stop {
+            tokio::select! {
+                _ = stop.cancelled() => return false,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+            }
+        } else {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }
+}
+
+async fn shutdown_workers(
+    asm: &Arc<Assembly>,
+    fastpath_stop: Option<CancellationToken>,
+    js: &mut JoinSet<()>,
+) {
+    asm.tun_ctl.set_carrier(false).unwrap();
+    if tokio::time::timeout(std::time::Duration::from_secs(5), asm.shutdown())
+        .await
+        .is_err()
+    {
+        warn!(target: STARTUP, "timed out waiting for PH peers to disconnect");
+    }
+    if let Some(fastpath_stop) = fastpath_stop {
+        fastpath_stop.cancel();
+    }
+    js.abort_all();
+    while let Some(result) = js.join_next().await {
+        if let Err(error) = result
+            && !error.is_cancelled()
+        {
+            error!(target: STARTUP, "worker failed during shutdown: {error}");
+        }
+    }
 }

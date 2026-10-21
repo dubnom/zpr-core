@@ -21,8 +21,10 @@ or UI.
   the October 7 progress below. This is not connected-adapter certification.
 - Windows now has an unvalidated Wintun packet-device source slice that opens
   an existing adapter; no Windows package or complete `ph` runtime is available.
-- Android and iOS have no `ph` platform integration. Android-specific packet
-  steering conditionals are not, by themselves, a working Android adapter.
+- Android has no `ph` platform integration; Android-specific packet steering
+  conditionals are not, by themselves, a working Android adapter. iOS has a
+  host-supplied packet-FD shim and a Rust C ABI, but no Network Extension host
+  or app package, so it is not a working iOS adapter.
 
 The porting boundary is wider than TUN creation. `ph` also uses Unix datagrams,
 Unix listeners/streams, and ancillary file-descriptor passing in its control,
@@ -254,6 +256,20 @@ binary link currently fails in AWS-LC with undefined `___chkstk_darwin` on this
 Xcode 27 host, so no executable/package claim is made. The library build is an
 `rlib`, not a Swift-callable framework or app. Network Extension host/FFI,
 packet-flow integration, entitlements, and app-group packaging remain absent.
+
+**Host API groundwork, 2026-10-21:** `ph` now exposes a narrow iOS C ABI that
+starts adapter mode from an absolute config path and a caller-owned local
+datagram socket, reports starting/ready/stopped state, and cancels and joins
+the worker. The descriptor is duplicated and validated as a local datagram
+socket; the caller retains ownership. iOS uses one fastpath worker. Rust owns
+the packet-device endpoint; the host must still implement the opposite socket
+endpoint and pump `NEPacketTunnelFlow` packets into and out of it. The API
+reports ready only after the configured peer's security association is
+established. A Swift packet-flow bridge now implements the local datagram
+socket pair and bounded packet pump, and a script builds a device/simulator
+`Ph.xcframework`. No `NEPacketTunnelProvider` target, keychain handoff,
+entitlement, app-group configuration, or route/DNS implementation is included.
+This is an FFI and packet-pump slice, not a usable or certified iOS adapter.
 
 ### 6. Release Gates
 

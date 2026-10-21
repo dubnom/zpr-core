@@ -31,6 +31,20 @@ impl PacketFd {
             ));
         }
 
+        let mut address = std::mem::MaybeUninit::<libc::sockaddr_storage>::zeroed();
+        let mut address_len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        if unsafe { libc::getsockname(raw_fd, address.as_mut_ptr().cast(), &mut address_len) } == -1
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let address = unsafe { address.assume_init() };
+        if address.ss_family as libc::sa_family_t != libc::AF_UNIX as libc::sa_family_t {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "packet-flow descriptor must be a local Unix datagram socket",
+            ));
+        }
+
         let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFL) };
         if flags == -1 {
             return Err(io::Error::last_os_error());
@@ -84,6 +98,13 @@ mod tests {
     fn packet_fd_rejects_stream_sockets() {
         let (stream, _peer) = UnixStream::pair().unwrap();
         let error = PacketFd::new(stream.into()).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn packet_fd_rejects_internet_datagram_sockets() {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let error = PacketFd::new(socket.into()).err().unwrap();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 }

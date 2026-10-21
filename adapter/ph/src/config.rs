@@ -85,10 +85,10 @@ pub(crate) const DEFAULT_MGMT_DATAPATH_QUEUE_SIZE: usize = 512;
 pub(crate) const DEFAULT_MGMT_PROCESSOR_QUEUE_SIZE: usize = 512;
 const DEFAULT_SERVICE_QUEUE_SIZE: usize = 128;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 const DEFAULT_WORKER_CONCURRENCY: usize = 4;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 const DEFAULT_WORKER_CONCURRENCY: usize = 1;
 
 pub const DEFAULT_KEEP_ALIVE_PERIOD: std::time::Duration = std::time::Duration::from_secs(3);
