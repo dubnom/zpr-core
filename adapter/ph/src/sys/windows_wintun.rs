@@ -7,6 +7,11 @@ use std::sync::Arc;
 
 const MAX_PACKET_SIZE: usize = 0xffff;
 const SESSION_CAPACITY: u32 = 0x20000;
+#[cfg(windows)]
+pub(crate) const MAXIMUM_WAIT_OBJECTS: usize = 64;
+const WAIT_OBJECT_0: u32 = 0;
+const WAIT_TIMEOUT: u32 = 258;
+const WAIT_FAILED: u32 = u32::MAX;
 
 #[derive(Clone, Debug)]
 pub(crate) struct WintunConfig {
@@ -81,6 +86,28 @@ fn verify_sha256(expected: &[u8; 32], contents: &[u8]) -> bool {
             difference | (left ^ right)
         })
         == 0
+}
+
+fn decode_wait_result(result: u32, handle_count: usize) -> io::Result<Option<usize>> {
+    if result == WAIT_TIMEOUT {
+        return Ok(None);
+    }
+    if result == WAIT_FAILED {
+        return Err(io::Error::other(
+            "WaitForMultipleObjects reported WAIT_FAILED",
+        ));
+    }
+
+    let index = result
+        .checked_sub(WAIT_OBJECT_0)
+        .ok_or_else(|| io::Error::other("WaitForMultipleObjects returned an unexpected result"))?
+        as usize;
+    if index >= handle_count {
+        return Err(io::Error::other(
+            "WaitForMultipleObjects returned an out-of-range event",
+        ));
+    }
+    Ok(Some(index))
 }
 
 #[derive(Clone, Copy)]
@@ -542,11 +569,7 @@ pub(crate) fn wait_for_events(
     handles: &[*mut std::ffi::c_void],
     timeout: Option<u16>,
 ) -> io::Result<Option<usize>> {
-    const MAXIMUM_WAIT_OBJECTS: usize = 64;
     const INFINITE: u32 = u32::MAX;
-    const WAIT_OBJECT_0: u32 = 0;
-    const WAIT_TIMEOUT: u32 = 258;
-    const WAIT_FAILED: u32 = u32::MAX;
 
     if handles.is_empty() {
         if let Some(timeout) = timeout {
@@ -570,30 +593,14 @@ pub(crate) fn wait_for_events(
         // SAFETY: all event handles are live, and the slice length matches count.
         WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, timeout)
     };
-    if result == WAIT_TIMEOUT {
-        return Ok(None);
-    }
     if result == WAIT_FAILED {
         return Err(io::Error::last_os_error());
     }
-    let index = result
-        .checked_sub(WAIT_OBJECT_0)
-        .ok_or_else(|| io::Error::other("WaitForMultipleObjects returned an unexpected result"))?
-        as usize;
-    if index >= handles.len() {
-        return Err(io::Error::other(
-            "WaitForMultipleObjects returned an out-of-range event",
-        ));
-    }
-    Ok(Some(index))
+    decode_wait_result(result, handles.len())
 }
 
 #[cfg(windows)]
 pub(crate) fn poll_event(handle: *mut std::ffi::c_void) -> io::Result<bool> {
-    const WAIT_OBJECT_0: u32 = 0;
-    const WAIT_TIMEOUT: u32 = 258;
-    const WAIT_FAILED: u32 = u32::MAX;
-
     let result = unsafe {
         // SAFETY: caller holds the session owning this event.
         WaitForSingleObject(handle, 0)
@@ -605,6 +612,34 @@ pub(crate) fn poll_event(handle: *mut std::ffi::c_void) -> io::Result<bool> {
         _ => Err(io::Error::other(
             "WaitForSingleObject returned an unexpected result",
         )),
+    }
+}
+
+#[cfg(test)]
+mod wait_result_tests {
+    use super::{WAIT_FAILED, WAIT_TIMEOUT, decode_wait_result};
+    use std::io;
+
+    #[test]
+    fn wait_result_decodes_signaled_event_index() {
+        assert_eq!(decode_wait_result(2, 3).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn wait_result_decodes_timeout() {
+        assert_eq!(decode_wait_result(WAIT_TIMEOUT, 1).unwrap(), None);
+    }
+
+    #[test]
+    fn wait_result_rejects_failed_wait_and_out_of_range_event() {
+        assert_eq!(
+            decode_wait_result(WAIT_FAILED, 1).unwrap_err().kind(),
+            io::ErrorKind::Other
+        );
+        assert_eq!(
+            decode_wait_result(1, 1).unwrap_err().to_string(),
+            "WaitForMultipleObjects returned an out-of-range event"
+        );
     }
 }
 
@@ -659,15 +694,14 @@ mod tests {
 
     impl Drop for TestTempDir {
         fn drop(&mut self) {
-            if let Some(path) = self.path.take() {
-                if let Err(error) = std::fs::remove_dir(&path) {
-                    if error.kind() != io::ErrorKind::NotFound {
-                        eprintln!(
-                            "failed to clean up Wintun test directory {}: {error}",
-                            path.display()
-                        );
-                    }
-                }
+            if let Some(path) = self.path.take()
+                && let Err(error) = std::fs::remove_dir(&path)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                eprintln!(
+                    "failed to clean up Wintun test directory {}: {error}",
+                    path.display()
+                );
             }
         }
     }
@@ -678,6 +712,7 @@ mod tests {
         fail_event: bool,
         fail_receive: bool,
         fail_send: bool,
+        would_block_send: bool,
         missing_adapter: bool,
         incoming: VecDeque<Box<[u8]>>,
         active_receive: Option<Box<[u8]>>,
@@ -757,6 +792,12 @@ mod tests {
 
         fn allocate_send_packet(&self, _session: usize, size: usize) -> io::Result<NonNull<u8>> {
             let mut state = self.0.lock().unwrap();
+            if state.would_block_send {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "fake send queue is full",
+                ));
+            }
             if state.fail_send {
                 return Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
@@ -890,6 +931,97 @@ mod tests {
         let state = api.0.lock().unwrap();
         assert_eq!(state.session_ends, 1);
         assert_eq!(state.adapter_closes, 1);
+    }
+
+    #[test]
+    fn malformed_receive_packets_are_released_without_copying() {
+        for incoming in [
+            Vec::new().into_boxed_slice(),
+            vec![0; MAX_PACKET_SIZE + 1].into_boxed_slice(),
+        ] {
+            let api = fake_api(FakeState {
+                incoming: [incoming].into(),
+                ..FakeState::default()
+            });
+            let session = Session::open(api.clone(), "existing").unwrap();
+            let mut packets = [packet()];
+            let mut results = Vec::new();
+
+            assert_eq!(session.read_packets(&mut packets, &mut results), 1);
+            assert_eq!(
+                results[0].as_ref().unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert!(packets[0].body().is_empty());
+            assert_eq!(api.0.lock().unwrap().receive_releases, 1);
+        }
+    }
+
+    #[test]
+    fn receive_packet_larger_than_buffer_tailroom_is_released() {
+        let api = fake_api(FakeState {
+            incoming: [vec![0; 513].into_boxed_slice()].into(),
+            ..FakeState::default()
+        });
+        let session = Session::open(api.clone(), "existing").unwrap();
+        let mut packets = [packet()];
+        let mut results = Vec::new();
+
+        assert_eq!(session.read_packets(&mut packets, &mut results), 1);
+        assert_eq!(
+            results[0].as_ref().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(packets[0].body().is_empty());
+        assert_eq!(api.0.lock().unwrap().receive_releases, 1);
+    }
+
+    #[test]
+    fn invalid_outbound_packet_sizes_are_reported_without_allocating() {
+        use bytes::BufMut;
+
+        let api = fake_api(FakeState::default());
+        let session = Session::open(api.clone(), "existing").unwrap();
+        let empty = packet();
+        let mut oversized = Packet::new(vec![0; MAX_PACKET_SIZE + 1024].into_boxed_slice(), 0);
+        oversized.put_slice(&vec![0; MAX_PACKET_SIZE + 1]);
+        let mut results = Vec::new();
+
+        assert_eq!(session.write_packets(&[empty, oversized], &mut results), 2);
+        assert!(
+            results
+                .iter()
+                .all(|result| result.as_ref().unwrap_err().kind() == io::ErrorKind::InvalidInput)
+        );
+        let state = api.0.lock().unwrap();
+        assert!(state.active_send.is_none());
+        assert!(state.sent.is_empty());
+    }
+
+    #[test]
+    fn full_send_queue_stops_batch_after_would_block() {
+        use bytes::BufMut;
+
+        let api = fake_api(FakeState {
+            would_block_send: true,
+            ..FakeState::default()
+        });
+        let session = Session::open(api.clone(), "existing").unwrap();
+        let mut packets = [packet(), packet()];
+        for packet in &mut packets {
+            packet.put_slice(b"outbound");
+        }
+        let mut results = Vec::new();
+
+        assert_eq!(session.write_packets(&packets, &mut results), 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].as_ref().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let state = api.0.lock().unwrap();
+        assert!(state.sent.is_empty());
+        assert!(state.active_send.is_none());
     }
 
     #[test]

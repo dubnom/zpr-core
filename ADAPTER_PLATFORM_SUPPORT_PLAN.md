@@ -155,7 +155,11 @@ validate packet forwarding.
   expected pin is checked before load, and the DLL remains locked against
   concurrent write/delete while it is checked and loaded. Fake API tests cover
   configuration validation, packet ownership, missing adapters, failed
-  startup cleanup, and shutdown. No real DLL is loaded by tests.
+  startup cleanup, and shutdown. Readiness accepts at most Win32's 64 readable
+  wait events and explicitly rejects larger sets instead of passing an
+  unsupported handle count to `WaitForMultipleObjects`. No real DLL is loaded
+  by tests. Wintun packets expose no platform packet-info header; the Windows
+  `TUN_HAS_PI` capability is explicitly false.
 - This source slice does not create/install/delete the Wintun driver or adapter,
   configure addresses/routes/firewall, install a service, elevate, or provide
   the Windows CLI/lifecycle package. Windows remains unsupported as a runnable
@@ -175,20 +179,36 @@ validate packet forwarding.
   `link.exe`, Windows SDK/CRT headers (`windows.h` and `stdlib.h`), the Windows
   SDK `kernel32.lib`, and the `x86_64-pc-windows-msvc` Rust target already
   installed. The script does not install tools or change host configuration;
-  it runs `cargo check -p ph --target x86_64-pc-windows-msvc` and
-  `cargo test -p ph --lib --target x86_64-pc-windows-msvc
-  sys::windows_wintun::tests` (all portable fake-backend tests; no real DLL
-  load). The `windows-msvc-ph` job in
+  it checks the package and `ph` executable, builds the executable, then runs
+  the complete `cargo test -p ph --target x86_64-pc-windows-msvc` suite,
+  including binary test targets and portable Wintun fake-backend/readiness
+  tests (no real DLL load). A CLI smoke invocation verifies that Windows
+  `ph adapter` exits unsuccessfully with the explicit compile-only/unsupported
+  message rather than claiming to start. This is a fail-closed placeholder,
+  not a runnable adapter. The `windows-msvc-ph` job in
   [adapter.yml](.github/workflows/adapter.yml) runs this gate on `windows-2022`
   after initializing the Visual Studio x64 environment and installing the Rust
-  target. The native CI outcome is pending; no Windows runner result has been
-  reported. The latest macOS cross-check stopped in `aws-lc-sys` before Rust
-  backend compilation because the Windows SDK/CRT headers `windows.h` and
-  `stdlib.h` were unavailable. Local macOS fake tests passed 8/8 but do not
-  establish Windows target compilation. A successful native gate establishes
-  target compilation and fake lifecycle-test success only—not DLL provenance,
-  driver or adapter installation, native packet flow, ZPR connectivity,
-  service lifecycle, or package/runtime acceptance.
+  target. Native validation on the Tiny Windows host passed on 2026-10-21:
+  `cargo check`, the Windows `ph` binary check/build, and all 50 `ph` library
+  tests passed (one synthetic benchmark is ignored), and the fail-closed
+  `ph adapter` CLI smoke assertion passed. Windows Clippy completed after
+  fixing the target-specific packet-info capability, but still reports
+  existing warnings in `libnode2` and shared `ph` code; the Windows readiness
+  test module has since been moved after production items to address the test
+  layout warning. Strict `-D warnings` is not clean. The GitHub Actions
+  Windows runner result
+  remains pending. The
+  earlier macOS cross-check stopped in
+  `aws-lc-sys` before Rust backend compilation because the Windows SDK/CRT
+  headers `windows.h` and `stdlib.h` were unavailable. The portable Wintun fake
+  suite also
+  covers malformed/oversized receive packets, buffer-tailroom rejection,
+  outbound size rejection, send-queue backpressure, and Wintun wait-result
+  decoding for signaled events, timeouts, failed waits, and invalid event
+  indexes. Native gate success establishes target compilation and fake
+  lifecycle/readiness-test success only—not DLL provenance, driver or adapter
+  installation, native packet flow, ZPR connectivity, service lifecycle, or
+  package/runtime acceptance.
 - Validate adapter bootstrap, ZPR link establishment, allowed/denied flows,
   visa revocation, reconnect, and service recovery in a Windows VM.
 

@@ -33,30 +33,30 @@ pub struct ReadinessRequest<'a> {
     pub interest: ReadinessInterest,
 }
 
-const STACK_READINESS_CAPACITY: usize = 64; // Win32's maximum wait-object count.
+const STACK_READINESS_CAPACITY: usize = windows_wintun::MAXIMUM_WAIT_OBJECTS;
 
 fn collect_readable_indices(
     readable_interests: impl Iterator<Item = bool>,
     readable_indices: &mut [usize],
-) -> Option<usize> {
+) -> io::Result<usize> {
     let mut readable_count = 0;
+    let capacity = readable_indices.len();
     for (index, readable) in readable_interests.enumerate() {
         if readable {
-            let Some(slot) = readable_indices.get_mut(readable_count) else {
-                return None;
-            };
+            let slot = readable_indices.get_mut(readable_count).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "cannot wait on more than {} readable Wintun events",
+                        capacity
+                    ),
+                )
+            })?;
             *slot = index;
             readable_count += 1;
         }
     }
-    Some(readable_count)
-}
-
-fn collect_readable_indices_fallback(readable_interests: impl Iterator<Item = bool>) -> Vec<usize> {
-    readable_interests
-        .enumerate()
-        .filter_map(|(index, readable)| readable.then_some(index))
-        .collect()
+    Ok(readable_count)
 }
 
 fn fill_readiness_handles(
@@ -119,21 +119,7 @@ pub fn wait_for_readiness<const N: usize>(
     let readable_count = collect_readable_indices(
         requests.iter().map(|request| request.interest.readable),
         &mut readable_requests,
-    );
-
-    let Some(readable_count) = readable_count else {
-        let readable_requests = collect_readable_indices_fallback(
-            requests.iter().map(|request| request.interest.readable),
-        );
-        let mut handles = vec![std::ptr::null_mut(); readable_requests.len()];
-        fill_readiness_handles(&requests, &readable_requests, &mut handles);
-        return wait_for_readiness_with_buffers(
-            requests,
-            timeout_millis,
-            &readable_requests,
-            &handles,
-        );
-    };
+    )?;
 
     if readable_count == 0 {
         if requests.iter().any(|request| request.interest.writable) {
@@ -166,12 +152,113 @@ pub fn wait_for_readiness<const N: usize>(
     )
 }
 
+pub struct ZprTun {
+    name: String,
+    session: Arc<Session>,
+}
+
+impl ZprTun {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn new_mq(
+        ifname: Option<String>,
+        concurrency: usize,
+        address: Option<IpAddr>,
+    ) -> Result<Vec<Self>, ZprTunError> {
+        if concurrency != 1 {
+            return Err(ZprTunError::PlatformError(
+                "Wintun uses one session and requires concurrency (queues) to be 1".into(),
+            ));
+        }
+        if address.is_some() {
+            return Err(ZprTunError::PlatformError(
+                "Windows address configuration is operator-managed and unsupported here".into(),
+            ));
+        }
+        let name = ifname.ok_or_else(|| {
+            ZprTunError::PlatformError(
+                "an existing Wintun adapter name is required; adapter creation is disabled".into(),
+            )
+        })?;
+        let config = windows_wintun::WintunConfig::from_environment()?;
+        let api = windows_wintun::load_pinned_api(&config)?;
+        let session = Arc::new(Session::open(api, &name)?);
+        Ok(vec![Self { name, session }])
+    }
+
+    pub fn set_carrier(&self, _carrier: bool) -> io::Result<()> {
+        Err(unsupported_operation(
+            "Wintun carrier control is not available in this backend",
+        ))
+    }
+
+    pub fn add_address(&self, _addr: IpAddr, _prefix_len: u8) -> io::Result<()> {
+        Err(unsupported_operation(
+            "Windows address configuration is operator-managed",
+        ))
+    }
+
+    pub fn clear_address(&self, _addr: IpAddr, _prefix_len: u8) -> io::Result<()> {
+        Err(unsupported_operation(
+            "Windows address configuration is operator-managed",
+        ))
+    }
+}
+
+impl PacketDevice for ZprTun {
+    fn readiness_source(&self) -> io::Result<ReadinessSource> {
+        Ok(ReadinessSource(Arc::clone(&self.session)))
+    }
+
+    fn packet_info_size(&self) -> usize {
+        0
+    }
+
+    fn read_packets(
+        &self,
+        _batch_io: &mut BatchIo,
+        packets: &mut [Packet],
+        results: &mut Vec<io::Result<usize>>,
+    ) -> io::Result<usize> {
+        Ok(self.session.read_packets(packets, results))
+    }
+
+    fn write_packets(
+        &self,
+        _batch_io: &mut BatchIo,
+        packets: &[Packet],
+        results: &mut Vec<io::Result<usize>>,
+    ) -> io::Result<usize> {
+        Ok(self.session.write_packets(packets, results))
+    }
+}
+
+fn unsupported_operation(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, message)
+}
+
+pub struct TunPiImpl;
+
+impl From<TunPiImpl> for TunPi {
+    fn from(_: TunPiImpl) -> Self {
+        Self {
+            strip: false,
+            proto: 0,
+        }
+    }
+}
+
+impl From<TunPi> for TunPiImpl {
+    fn from(_: TunPi) -> Self {
+        Self
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        STACK_READINESS_CAPACITY, collect_readable_indices, collect_readable_indices_fallback,
-        map_readiness_events,
-    };
+    use super::{STACK_READINESS_CAPACITY, collect_readable_indices, map_readiness_events};
     use std::cell::Cell;
     use std::io;
     use std::time::Instant;
@@ -181,7 +268,7 @@ mod tests {
         let mut indices = [usize::MAX; 3];
         let count = collect_readable_indices([false, false, false].into_iter(), &mut indices);
 
-        assert_eq!(count, Some(0));
+        assert_eq!(count.unwrap(), 0);
         assert_eq!(indices, [usize::MAX; 3]);
     }
 
@@ -189,9 +276,9 @@ mod tests {
     fn collect_readable_indices_preserves_request_order() {
         let mut indices = [usize::MAX; 5];
         let count =
-            collect_readable_indices([true, false, true, false, true].into_iter(), &mut indices);
+            collect_readable_indices([true, false, true, false, true].into_iter(), &mut indices)
+                .unwrap();
 
-        let count = count.unwrap();
         assert_eq!(count, 3);
         assert_eq!(&indices[..count], &[0, 2, 4]);
     }
@@ -201,7 +288,7 @@ mod tests {
         let mut indices = [usize::MAX; 3];
         let count = collect_readable_indices([true, true, true].into_iter(), &mut indices);
 
-        assert_eq!(count, Some(3));
+        assert_eq!(count.unwrap(), 3);
         assert_eq!(indices, [0, 1, 2]);
     }
 
@@ -211,33 +298,28 @@ mod tests {
         let count = collect_readable_indices(
             (0..STACK_READINESS_CAPACITY + 1).map(|index| index == STACK_READINESS_CAPACITY),
             &mut indices,
-        );
+        )
+        .unwrap();
 
-        assert_eq!(count, Some(1));
+        assert_eq!(count, 1);
         assert_eq!(indices[0], STACK_READINESS_CAPACITY);
     }
 
     #[test]
-    fn collect_readable_indices_signals_fallback_when_stack_capacity_is_exceeded() {
+    fn collect_readable_indices_rejects_more_than_the_wait_object_limit() {
         let mut indices = [usize::MAX; STACK_READINESS_CAPACITY];
         let count = collect_readable_indices(
             std::iter::repeat_n(true, STACK_READINESS_CAPACITY + 1),
             &mut indices,
         );
 
-        assert_eq!(count, None);
+        let error = count.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.to_string(),
+            format!("cannot wait on more than {STACK_READINESS_CAPACITY} readable Wintun events")
+        );
         assert_eq!(indices, std::array::from_fn(|index| index));
-    }
-
-    #[test]
-    fn fallback_keeps_all_indices_beyond_stack_capacity() {
-        let indices = collect_readable_indices_fallback(std::iter::repeat_n(
-            true,
-            STACK_READINESS_CAPACITY + 1,
-        ));
-
-        assert_eq!(indices.len(), STACK_READINESS_CAPACITY + 1);
-        assert_eq!(indices[STACK_READINESS_CAPACITY], STACK_READINESS_CAPACITY);
     }
 
     #[test]
@@ -358,109 +440,5 @@ mod tests {
         let stack_elapsed = stack_start.elapsed();
 
         eprintln!("iterations={ITERATIONS} baseline={baseline_elapsed:?} stack={stack_elapsed:?}");
-    }
-}
-
-pub struct ZprTun {
-    name: String,
-    session: Arc<Session>,
-}
-
-impl ZprTun {
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn new_mq(
-        ifname: Option<String>,
-        concurrency: usize,
-        address: Option<IpAddr>,
-    ) -> Result<Vec<Self>, ZprTunError> {
-        if concurrency != 1 {
-            return Err(ZprTunError::PlatformError(
-                "Wintun uses one session and requires concurrency (queues) to be 1".into(),
-            ));
-        }
-        if address.is_some() {
-            return Err(ZprTunError::PlatformError(
-                "Windows address configuration is operator-managed and unsupported here".into(),
-            ));
-        }
-        let name = ifname.ok_or_else(|| {
-            ZprTunError::PlatformError(
-                "an existing Wintun adapter name is required; adapter creation is disabled".into(),
-            )
-        })?;
-        let config = windows_wintun::WintunConfig::from_environment()?;
-        let api = windows_wintun::load_pinned_api(&config)?;
-        let session = Arc::new(Session::open(api, &name)?);
-        Ok(vec![Self { name, session }])
-    }
-
-    pub fn set_carrier(&self, _carrier: bool) -> io::Result<()> {
-        Err(unsupported_operation(
-            "Wintun carrier control is not available in this backend",
-        ))
-    }
-
-    pub fn add_address(&self, _addr: IpAddr, _prefix_len: u8) -> io::Result<()> {
-        Err(unsupported_operation(
-            "Windows address configuration is operator-managed",
-        ))
-    }
-
-    pub fn clear_address(&self, _addr: IpAddr, _prefix_len: u8) -> io::Result<()> {
-        Err(unsupported_operation(
-            "Windows address configuration is operator-managed",
-        ))
-    }
-}
-
-impl PacketDevice for ZprTun {
-    fn readiness_source(&self) -> io::Result<ReadinessSource> {
-        Ok(ReadinessSource(Arc::clone(&self.session)))
-    }
-
-    fn packet_info_size(&self) -> usize {
-        0
-    }
-
-    fn read_packets(
-        &self,
-        _batch_io: &mut BatchIo,
-        packets: &mut [Packet],
-        results: &mut Vec<io::Result<usize>>,
-    ) -> io::Result<usize> {
-        Ok(self.session.read_packets(packets, results))
-    }
-
-    fn write_packets(
-        &self,
-        _batch_io: &mut BatchIo,
-        packets: &[Packet],
-        results: &mut Vec<io::Result<usize>>,
-    ) -> io::Result<usize> {
-        Ok(self.session.write_packets(packets, results))
-    }
-}
-
-fn unsupported_operation(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::Unsupported, message)
-}
-
-pub struct TunPiImpl;
-
-impl From<TunPiImpl> for TunPi {
-    fn from(_: TunPiImpl) -> Self {
-        Self {
-            strip: false,
-            proto: 0,
-        }
-    }
-}
-
-impl From<TunPi> for TunPiImpl {
-    fn from(_: TunPi) -> Self {
-        Self
     }
 }

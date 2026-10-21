@@ -4,6 +4,7 @@
 //!
 //!
 //!
+#[cfg(not(windows))]
 use crate::sys::TunPi;
 
 #[allow(dead_code)]
@@ -21,4 +22,9 @@ pub enum ZprTunError {
 
 /// TRUE if the platform TUN implementation supports per-packet packet info.
 #[allow(dead_code)]
+#[cfg(not(windows))]
 pub const TUN_HAS_PI: bool = TunPi::PI_SIZE > 0;
+
+#[allow(dead_code)]
+#[cfg(windows)]
+pub const TUN_HAS_PI: bool = false;

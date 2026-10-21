@@ -89,15 +89,45 @@ Push-Location $repositoryRoot
 try {
     Invoke-GateCommand 'cargo' @('check', '-p', 'ph', '--target', 'x86_64-pc-windows-msvc')
     Invoke-GateCommand 'cargo' @(
+        'check',
+        '-p', 'ph',
+        '--bin', 'ph',
+        '--target', 'x86_64-pc-windows-msvc'
+    )
+    Invoke-GateCommand 'cargo' @(
+        'build',
+        '-p', 'ph',
+        '--bin', 'ph',
+        '--target', 'x86_64-pc-windows-msvc'
+    )
+    Invoke-GateCommand 'cargo' @(
         'test',
         '-p', 'ph',
-        '--lib',
-        '--target', 'x86_64-pc-windows-msvc',
-        'sys::windows_wintun::tests'
+        '--target', 'x86_64-pc-windows-msvc'
     )
+
+    $binary = Join-Path $repositoryRoot 'target\x86_64-pc-windows-msvc\debug\ph.exe'
+    if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+        Stop-Gate "Expected Windows PH binary was not built at '$binary'."
+    }
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = & $binary 'adapter' 2>&1
+        $binaryExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($binaryExitCode -eq 0) {
+        Stop-Gate "'ph adapter' unexpectedly succeeded although Windows adapter startup is unsupported."
+    }
+    if (($output -join "`n") -notmatch 'compile-only; PH adapter and node startup are unsupported') {
+        Stop-Gate "'ph adapter' did not report the expected unsupported-startup message."
+    }
 }
 finally {
     Pop-Location
 }
 
-Write-Host 'Windows MSVC compile and fake-backend test checks passed.'
+Write-Host 'Windows MSVC compile, complete PH package tests, and fail-closed CLI smoke check passed.'
