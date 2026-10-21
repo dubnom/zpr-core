@@ -376,25 +376,38 @@ impl ZprTun {
         concurrency: usize,
         address: Option<IpAddr>,
     ) -> Result<Vec<Self>, ZprTunError> {
-        if concurrency != 1 {
-            return Err(ZprTunError::PlatformError(
-                "Wintun uses one session and requires concurrency (queues) to be 1".into(),
-            ));
-        }
-        if address.is_some() {
-            return Err(ZprTunError::PlatformError(
-                "Windows address configuration is operator-managed and unsupported here".into(),
-            ));
-        }
-        let name = ifname.ok_or_else(|| {
-            ZprTunError::PlatformError(
-                "an existing Wintun adapter name is required; adapter creation is disabled".into(),
-            )
-        })?;
+        let name = validate_new_mq_options(ifname, concurrency, address)?;
+        let create_adapter = windows_wintun::create_adapter_requested_from_environment()?;
         let config = windows_wintun::WintunConfig::from_environment()?;
         let api = windows_wintun::load_pinned_api(&config)?;
-        let session = Arc::new(Session::open(api, &name)?);
-        Ok(vec![Self { name, session }])
+        Self::new_with_api(name, api, create_adapter)
+    }
+
+    fn new_mq_with_api(
+        ifname: Option<String>,
+        concurrency: usize,
+        address: Option<IpAddr>,
+        api: Arc<dyn windows_wintun::WintunApi>,
+        create_adapter: bool,
+    ) -> Result<Vec<Self>, ZprTunError> {
+        let name = validate_new_mq_options(ifname, concurrency, address)?;
+        Self::new_with_api(name, api, create_adapter)
+    }
+
+    fn new_with_api(
+        name: String,
+        api: Arc<dyn windows_wintun::WintunApi>,
+        create_adapter: bool,
+    ) -> Result<Vec<Self>, ZprTunError> {
+        let session = if create_adapter {
+            Session::create(api, &name)?
+        } else {
+            Session::open(api, &name)?
+        };
+        Ok(vec![Self {
+            name,
+            session: Arc::new(session),
+        }])
     }
 
     pub fn set_carrier(&self, _carrier: bool) -> io::Result<()> {
@@ -414,6 +427,27 @@ impl ZprTun {
             "Windows address configuration is operator-managed",
         ))
     }
+}
+
+fn validate_new_mq_options(
+    ifname: Option<String>,
+    concurrency: usize,
+    address: Option<IpAddr>,
+) -> Result<String, ZprTunError> {
+    if concurrency != 1 {
+        return Err(ZprTunError::PlatformError(
+            "Wintun uses one session and requires concurrency (queues) to be 1".into(),
+        ));
+    }
+    if address.is_some() {
+        return Err(ZprTunError::PlatformError(
+            "Windows address configuration is operator-managed and unsupported here".into(),
+        ));
+    }
+    let name = ifname.ok_or_else(|| {
+        ZprTunError::PlatformError("an explicit Wintun adapter name is required".into())
+    })?;
+    Ok(name)
 }
 
 impl PacketDevice for ZprTun {
@@ -462,5 +496,121 @@ impl From<TunPiImpl> for TunPi {
 impl From<TunPi> for TunPiImpl {
     fn from(_: TunPi) -> Self {
         Self
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct FakeState {
+        opened_name: Option<String>,
+        created_name: Option<String>,
+        created_tunnel_type: Option<String>,
+        open_calls: usize,
+        create_calls: usize,
+        session_ends: usize,
+        closed_adapters: Vec<usize>,
+    }
+
+    #[derive(Default)]
+    struct FakeApi(Mutex<FakeState>);
+
+    impl windows_wintun::WintunApi for FakeApi {
+        fn open_adapter(&self, name: &str) -> io::Result<usize> {
+            let mut state = self.0.lock().unwrap();
+            state.open_calls += 1;
+            state.opened_name = Some(name.to_owned());
+            Ok(11)
+        }
+
+        fn create_adapter(&self, name: &str, tunnel_type: &str) -> io::Result<usize> {
+            let mut state = self.0.lock().unwrap();
+            state.create_calls += 1;
+            state.created_name = Some(name.to_owned());
+            state.created_tunnel_type = Some(tunnel_type.to_owned());
+            Ok(22)
+        }
+
+        fn close_adapter(&self, adapter: usize) {
+            self.0.lock().unwrap().closed_adapters.push(adapter);
+        }
+
+        fn start_session(&self, _adapter: usize, _capacity: u32) -> io::Result<usize> {
+            Ok(33)
+        }
+
+        fn end_session(&self, _session: usize) {
+            self.0.lock().unwrap().session_ends += 1;
+        }
+
+        fn read_wait_event(&self, _session: usize) -> io::Result<usize> {
+            Ok(44)
+        }
+
+        fn receive_packet(&self, _session: usize) -> io::Result<Option<windows_wintun::RawPacket>> {
+            Ok(None)
+        }
+
+        fn release_receive_packet(&self, _session: usize, _packet: std::ptr::NonNull<u8>) {}
+
+        fn allocate_send_packet(
+            &self,
+            _session: usize,
+            _size: usize,
+        ) -> io::Result<std::ptr::NonNull<u8>> {
+            Err(io::Error::other("not used by constructor tests"))
+        }
+
+        fn send_packet(&self, _session: usize, _packet: std::ptr::NonNull<u8>) {}
+    }
+
+    #[test]
+    fn constructor_opens_existing_adapter_by_default() {
+        let api = Arc::new(FakeApi::default());
+        let devices =
+            ZprTun::new_mq_with_api(Some("existing".into()), 1, None, api.clone(), false).unwrap();
+        assert_eq!(devices[0].name(), "existing");
+        {
+            let state = api.0.lock().unwrap();
+            assert_eq!(state.open_calls, 1);
+            assert_eq!(state.opened_name.as_deref(), Some("existing"));
+            assert_eq!(state.create_calls, 0);
+        }
+
+        drop(devices);
+        let state = api.0.lock().unwrap();
+        assert_eq!(state.session_ends, 1);
+        assert_eq!(state.closed_adapters.as_slice(), &[11]);
+    }
+
+    #[test]
+    fn constructor_creates_only_when_explicitly_requested() {
+        let api = Arc::new(FakeApi::default());
+        let devices =
+            ZprTun::new_mq_with_api(Some("new-zpr".into()), 1, None, api.clone(), true).unwrap();
+        {
+            let state = api.0.lock().unwrap();
+            assert_eq!(state.open_calls, 0);
+            assert_eq!(state.create_calls, 1);
+            assert_eq!(state.created_name.as_deref(), Some("new-zpr"));
+            assert_eq!(state.created_tunnel_type.as_deref(), Some("ZPR"));
+        }
+
+        drop(devices);
+        let state = api.0.lock().unwrap();
+        assert_eq!(state.session_ends, 1);
+        assert_eq!(state.closed_adapters.as_slice(), &[22]);
+    }
+
+    #[test]
+    fn constructor_requires_an_explicit_name_before_api_calls() {
+        let api = Arc::new(FakeApi::default());
+        assert!(ZprTun::new_mq_with_api(None, 1, None, api.clone(), true).is_err());
+        let state = api.0.lock().unwrap();
+        assert_eq!(state.open_calls, 0);
+        assert_eq!(state.create_calls, 0);
     }
 }

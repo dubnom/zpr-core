@@ -45,6 +45,23 @@ impl WintunConfig {
     }
 }
 
+fn parse_create_adapter_flag(value: Option<&std::ffi::OsStr>) -> io::Result<bool> {
+    match value.and_then(std::ffi::OsStr::to_str) {
+        None if value.is_none() => Ok(false),
+        Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ZPR_WINTUN_CREATE_ADAPTER must be unset, 0, or 1",
+        )),
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn create_adapter_requested_from_environment() -> io::Result<bool> {
+    parse_create_adapter_flag(std::env::var_os("ZPR_WINTUN_CREATE_ADAPTER").as_deref())
+}
+
 fn parse_sha256(value: &str) -> io::Result<[u8; 32]> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(io::Error::new(
@@ -91,6 +108,7 @@ pub(crate) struct RawPacket {
 
 pub(crate) trait WintunApi: Send + Sync {
     fn open_adapter(&self, name: &str) -> io::Result<usize>;
+    fn create_adapter(&self, name: &str, tunnel_type: &str) -> io::Result<usize>;
     fn close_adapter(&self, adapter: usize);
     fn start_session(&self, adapter: usize, capacity: u32) -> io::Result<usize>;
     fn end_session(&self, session: usize);
@@ -109,6 +127,11 @@ struct AdapterHandle {
 impl AdapterHandle {
     fn open(api: Arc<dyn WintunApi>, name: &str) -> io::Result<Self> {
         let handle = api.open_adapter(name)?;
+        Ok(Self { api, handle })
+    }
+
+    fn create(api: Arc<dyn WintunApi>, name: &str) -> io::Result<Self> {
+        let handle = api.create_adapter(name, "ZPR")?;
         Ok(Self { api, handle })
     }
 }
@@ -150,14 +173,18 @@ unsafe impl Sync for Session {}
 
 impl Session {
     pub(crate) fn open(api: Arc<dyn WintunApi>, adapter_name: &str) -> io::Result<Self> {
-        if adapter_name.is_empty() || adapter_name.contains('\0') {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Wintun adapter name must be non-empty and contain no NUL character",
-            ));
-        }
-
+        validate_adapter_name(adapter_name)?;
         let adapter = AdapterHandle::open(api, adapter_name)?;
+        Self::start(adapter)
+    }
+
+    pub(crate) fn create(api: Arc<dyn WintunApi>, adapter_name: &str) -> io::Result<Self> {
+        validate_adapter_name(adapter_name)?;
+        let adapter = AdapterHandle::create(api, adapter_name)?;
+        Self::start(adapter)
+    }
+
+    fn start(adapter: AdapterHandle) -> io::Result<Self> {
         let session = SessionHandle::start(adapter)?;
         let read_wait_event = session.adapter.api.read_wait_event(session.handle)?;
         if read_wait_event == 0 {
@@ -275,6 +302,16 @@ impl Session {
     }
 }
 
+fn validate_adapter_name(adapter_name: &str) -> io::Result<()> {
+    if adapter_name.is_empty() || adapter_name.contains('\0') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Wintun adapter name must be non-empty and contain no NUL character",
+        ));
+    }
+    Ok(())
+}
+
 struct ReceivePacketGuard<'a> {
     api: &'a dyn WintunApi,
     session: usize,
@@ -363,6 +400,13 @@ impl Drop for Library {
 struct DynamicApi {
     _library: Library,
     open_adapter: unsafe extern "system" fn(*const u16) -> *mut std::ffi::c_void,
+    create_adapter: Option<
+        unsafe extern "system" fn(
+            *const u16,
+            *const u16,
+            *const std::ffi::c_void,
+        ) -> *mut std::ffi::c_void,
+    >,
     close_adapter: unsafe extern "system" fn(*mut std::ffi::c_void),
     start_session: unsafe extern "system" fn(*mut std::ffi::c_void, u32) -> *mut std::ffi::c_void,
     end_session: unsafe extern "system" fn(*mut std::ffi::c_void),
@@ -393,9 +437,30 @@ impl DynamicApi {
             })
         }
 
+        unsafe fn optional_symbol<T: Copy>(
+            library: usize,
+            name: &'static [u8],
+        ) -> io::Result<Option<T>> {
+            let address = unsafe {
+                // SAFETY: name is a static NUL-terminated export name.
+                GetProcAddress(library as *mut std::ffi::c_void, name.as_ptr().cast())
+            };
+            if address.is_null() {
+                return Ok(None);
+            }
+            if std::mem::size_of::<T>() != std::mem::size_of_val(&address) {
+                return Err(io::Error::other("unexpected Wintun function pointer size"));
+            }
+            Ok(Some(unsafe {
+                // SAFETY: callers request the documented function-pointer type for each export.
+                std::mem::transmute_copy(&address)
+            }))
+        }
+
         let handle = library.0;
         Ok(Self {
             open_adapter: unsafe { symbol(handle, b"WintunOpenAdapter\0")? },
+            create_adapter: unsafe { optional_symbol(handle, b"WintunCreateAdapter\0")? },
             close_adapter: unsafe { symbol(handle, b"WintunCloseAdapter\0")? },
             start_session: unsafe { symbol(handle, b"WintunStartSession\0")? },
             end_session: unsafe { symbol(handle, b"WintunEndSession\0")? },
@@ -421,6 +486,30 @@ impl WintunApi for DynamicApi {
         let handle = unsafe {
             // SAFETY: name is a NUL-terminated UTF-16 adapter name.
             (self.open_adapter)(name.as_ptr())
+        };
+        non_null_handle(handle)
+    }
+
+    fn create_adapter(&self, name: &str, tunnel_type: &str) -> io::Result<usize> {
+        use std::os::windows::ffi::OsStrExt;
+
+        let create_adapter = self.create_adapter.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Wintun DLL does not export WintunCreateAdapter",
+            )
+        })?;
+        let name: Vec<u16> = std::ffi::OsStr::new(name)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let tunnel_type: Vec<u16> = std::ffi::OsStr::new(tunnel_type)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let handle = unsafe {
+            // SAFETY: both strings are NUL-terminated UTF-16; null requests a Wintun-assigned GUID.
+            create_adapter(name.as_ptr(), tunnel_type.as_ptr(), std::ptr::null())
         };
         non_null_handle(handle)
     }
@@ -674,6 +763,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeState {
+        fail_create: bool,
         fail_start: bool,
         fail_event: bool,
         fail_receive: bool,
@@ -686,6 +776,8 @@ mod tests {
         receive_releases: usize,
         session_ends: usize,
         adapter_closes: usize,
+        adapter_opens: usize,
+        adapter_creates: usize,
     }
 
     #[derive(Default)]
@@ -693,13 +785,25 @@ mod tests {
 
     impl WintunApi for FakeApi {
         fn open_adapter(&self, _name: &str) -> io::Result<usize> {
-            if self.0.lock().unwrap().missing_adapter {
+            let mut state = self.0.lock().unwrap();
+            state.adapter_opens += 1;
+            if state.missing_adapter {
                 Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     "fake adapter not found",
                 ))
             } else {
                 Ok(1)
+            }
+        }
+
+        fn create_adapter(&self, _name: &str, _tunnel_type: &str) -> io::Result<usize> {
+            let mut state = self.0.lock().unwrap();
+            state.adapter_creates += 1;
+            if state.fail_create {
+                Err(io::Error::other("fake adapter creation failure"))
+            } else {
+                Ok(4)
             }
         }
 
@@ -800,6 +904,14 @@ mod tests {
     }
 
     #[test]
+    fn adapter_creation_flag_is_explicit_and_defaults_off() {
+        assert!(!parse_create_adapter_flag(None).unwrap());
+        assert!(!parse_create_adapter_flag(Some(std::ffi::OsStr::new("0"))).unwrap());
+        assert!(parse_create_adapter_flag(Some(std::ffi::OsStr::new("1"))).unwrap());
+        assert!(parse_create_adapter_flag(Some(std::ffi::OsStr::new("true"))).is_err());
+    }
+
+    #[test]
     fn sha256_pin_comparison_checks_the_exact_contents() {
         let expected = sha256(b"pinned DLL bytes");
         assert!(verify_sha256(&expected, b"pinned DLL bytes"));
@@ -814,6 +926,60 @@ mod tests {
         });
         assert!(Session::open(api.clone(), "missing").is_err());
         assert_eq!(api.0.lock().unwrap().adapter_closes, 0);
+    }
+
+    #[test]
+    fn created_adapter_session_closes_its_handles_on_teardown() {
+        let api = fake_api(FakeState::default());
+        let session = Session::create(api.clone(), "created").unwrap();
+        {
+            let state = api.0.lock().unwrap();
+            assert_eq!(state.adapter_creates, 1);
+            assert_eq!(state.adapter_opens, 0);
+            assert_eq!(state.adapter_closes, 0);
+        }
+
+        drop(session);
+        let state = api.0.lock().unwrap();
+        assert_eq!(state.session_ends, 1);
+        assert_eq!(state.adapter_closes, 1);
+    }
+
+    #[test]
+    fn created_adapter_handle_closes_if_session_start_fails() {
+        let api = fake_api(FakeState {
+            fail_start: true,
+            ..FakeState::default()
+        });
+        assert!(Session::create(api.clone(), "created").is_err());
+        let state = api.0.lock().unwrap();
+        assert_eq!(state.session_ends, 0);
+        assert_eq!(state.adapter_closes, 1);
+    }
+
+    #[test]
+    fn created_adapter_session_and_handle_close_if_event_retrieval_fails() {
+        let api = fake_api(FakeState {
+            fail_event: true,
+            ..FakeState::default()
+        });
+        assert!(Session::create(api.clone(), "created").is_err());
+        let state = api.0.lock().unwrap();
+        assert_eq!(state.session_ends, 1);
+        assert_eq!(state.adapter_closes, 1);
+    }
+
+    #[test]
+    fn failed_adapter_creation_returns_no_handle_to_close() {
+        let api = fake_api(FakeState {
+            fail_create: true,
+            ..FakeState::default()
+        });
+        assert!(Session::create(api.clone(), "created").is_err());
+        let state = api.0.lock().unwrap();
+        assert_eq!(state.adapter_creates, 1);
+        assert_eq!(state.session_ends, 0);
+        assert_eq!(state.adapter_closes, 0);
     }
 
     #[test]

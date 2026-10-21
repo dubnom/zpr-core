@@ -156,10 +156,20 @@ validate packet forwarding.
   concurrent write/delete while it is checked and loaded. Fake API tests cover
   configuration validation, packet ownership, missing adapters, failed
   startup cleanup, and shutdown. No real DLL is loaded by tests.
-- This source slice does not create/install/delete the Wintun driver or adapter,
-  configure addresses/routes/firewall, install a service, elevate, or provide
-  the Windows CLI/lifecycle package. Windows remains unsupported as a runnable
-  package. The compile/fake-test gate does not require or load a Wintun DLL.
+- **Additional source slice, 2026-10-20:** `ZPR_WINTUN_CREATE_ADAPTER=1`
+  explicitly opts `new_mq` into `WintunCreateAdapter`; unset or `0` preserves
+  the open-only path, and other values fail. The adapter name remains explicit.
+  Fake API tests cover default-open versus opted-in creation, handle ownership,
+  partial-startup cleanup, and teardown. Tests do not load a DLL or create a
+  Windows device. Closing a session closes its session and adapter handles; it
+  does not remove the persistent adapter. Wintun exposes no per-adapter delete
+  API, and this code does not call the global `WintunDeleteDriver`.
+- Adapter creation is development-only and may require elevation and cause
+  Wintun to install its driver. This source slice does not configure
+  addresses/routes/firewall, install a service, elevate, remove adapters, or
+  provide the Windows CLI/lifecycle package. Windows remains unsupported as a
+  runnable package. The compile/fake-test gate does not require or load a
+  Wintun DLL.
   Actual runtime remains blocked on an operator-managed DLL supplied from an
   approved source, with version, license, expected SHA-256, code-signing
   provenance, and deployment process reviewed; no DLL is distributed here.

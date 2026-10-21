@@ -1,5 +1,7 @@
 #![cfg_attr(feature = "ci", deny(warnings))]
 
+pub mod windows_profile;
+
 #[cfg(not(windows))]
 include!("lib_unix.inc.rs");
 
