@@ -9,6 +9,7 @@ OUTPUT_DIR="${1:-"$ROOT_DIR/target/ios-xcframework"}"
 OUTPUT="$OUTPUT_DIR/Ph.xcframework"
 DEVICE_TARGET="aarch64-apple-ios"
 SIMULATOR_TARGET="aarch64-apple-ios-sim"
+IOS_DEPLOYMENT_TARGET="15.0"
 
 for target in "$DEVICE_TARGET" "$SIMULATOR_TARGET"; do
     if ! rustup target list --installed | grep -Fqx "$target"; then
@@ -22,6 +23,12 @@ if [[ -e "$OUTPUT" ]]; then
     exit 1
 fi
 
+BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zpr-ph-ios-build.XXXXXX")"
+trap 'rm -rf "$BUILD_DIR"' EXIT
+BUILD_TARGET_DIR="$BUILD_DIR/cargo-target"
+
+IPHONEOS_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET" \
+CARGO_TARGET_DIR="$BUILD_TARGET_DIR" \
 cargo build \
     --manifest-path "$ROOT_DIR/Cargo.toml" \
     --package ph \
@@ -30,6 +37,8 @@ cargo build \
     --target "$DEVICE_TARGET" \
     --locked \
     --offline
+IPHONEOS_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET" \
+CARGO_TARGET_DIR="$BUILD_TARGET_DIR" \
 cargo build \
     --manifest-path "$ROOT_DIR/Cargo.toml" \
     --package ph \
@@ -41,22 +50,22 @@ cargo build \
 
 swiftc \
     -typecheck \
-    -target arm64-apple-ios15.0 \
+    -target "arm64-apple-ios$IOS_DEPLOYMENT_TARGET" \
     -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
     -I "$MODULE_DIR" \
     "$ROOT_DIR/packaging/ios/ZprPacketFlowBridge.swift"
 swiftc \
     -typecheck \
-    -target arm64-apple-ios15.0-simulator \
+    -target "arm64-apple-ios$IOS_DEPLOYMENT_TARGET-simulator" \
     -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
     -I "$MODULE_DIR" \
     "$ROOT_DIR/packaging/ios/ZprPacketFlowBridge.swift"
 
 mkdir -p "$OUTPUT_DIR"
 xcodebuild -create-xcframework \
-    -library "$ROOT_DIR/target/$DEVICE_TARGET/release/libph.a" \
+    -library "$BUILD_TARGET_DIR/$DEVICE_TARGET/release/libph.a" \
     -headers "$HEADER_DIR" \
-    -library "$ROOT_DIR/target/$SIMULATOR_TARGET/release/libph.a" \
+    -library "$BUILD_TARGET_DIR/$SIMULATOR_TARGET/release/libph.a" \
     -headers "$HEADER_DIR" \
     -output "$OUTPUT"
 

@@ -1,0 +1,51 @@
+# SYNTHETIC LAB ONLY. This fixture maps machine-01 to the finance-client source,
+# targeting the synthetic FinanceWorkspace service at fd00:1:2::1.
+# In the synthetic lab manifest, machine-01 alone is active/provisioned; all other
+# entries remain inert, with no more than 12 active machines. This file does not
+# provision machines or define a production package/runtime mapping.
+# Handoff only: embed this topology in runtime/northstar-synthetic/scenarios/
+# machine-policy-deny.json (organization_id=northstar, id=machine-policy-deny)
+# using its existing nodes/links/components fields. Project finance-client as
+# kind=client, machine=machine-01, agent=finance-client, target=fd00:1:2::1;
+# project FinanceWorkspace as kind=service, address=fd00:1:2::1.
+# The source ULA is fixture-only, not the runtime-selected address. Substrate
+# endpoints are documentation-only and must not be used for live networking.
+
+[resolver]
+order = ["hosts"]
+
+[resolver.hosts]
+"finance-client" = "fd00:5a17:2026:104::1"
+"finance-workspace" = "fd00:1:2::1"
+
+[nodes.machine_01_finance_client]
+zpr_address = "fd00:5a17:2026:104::1"
+provider = [["device.zpr.adapter.cn", "finance-client"]]
+
+[nodes.machine_01_finance_client.substrate_addrs]
+finance = "192.0.2.10:5000"
+
+[nodes.northstar_finance_workspace]
+zpr_address = "fd00:1:2::1"
+provider = [["device.zpr.adapter.cn", "finance-workspace"]]
+
+[nodes.northstar_finance_workspace.substrate_addrs]
+workspace = "192.0.2.11:5000"
+
+[links.finance-to-workspace]
+peers = [
+    { node = "machine_01_finance_client", interface = "finance" },
+    { node = "northstar_finance_workspace", interface = "workspace" },
+]
+
+[trusted_services.default]
+cert_path = ""
+
+[protocols.icmpv6_echo_request]
+l4protocol = "iana.ICMP6"
+icmp_type = "oneshot"
+icmp_codes = [128]
+
+[services.FinanceWorkspace]
+protocol = "icmpv6_echo_request"
+provider = [["device.zpr.adapter.cn", "finance-workspace"]]
