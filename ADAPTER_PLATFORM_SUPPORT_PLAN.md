@@ -189,14 +189,15 @@ validate packet forwarding.
   [adapter.yml](.github/workflows/adapter.yml) runs this gate on `windows-2022`
   after initializing the Visual Studio x64 environment and installing the Rust
   target. Native validation on the Tiny Windows host passed on 2026-10-21:
-  `cargo check`, the Windows `ph` binary check/build, and all 50 `ph` library
+  `cargo check`, the Windows `ph` binary check/build, and all 52 `ph` library
   tests passed (one synthetic benchmark is ignored), and the fail-closed
-  `ph adapter` CLI smoke assertion passed. Windows Clippy completed after
-  fixing the target-specific packet-info capability, but still reports
-  existing warnings in `libnode2` and shared `ph` code; the Windows readiness
-  test module has since been moved after production items to address the test
-  layout warning. Strict `-D warnings` is not clean. The GitHub Actions
-  Windows runner result
+  `ph adapter` CLI smoke assertion passed. The fake tests also verify that
+  empty/NUL-containing adapter names are rejected before startup and that a
+  null Wintun read-wait event tears down the session and adapter. The Windows
+  readiness test module was moved after production items to address its test
+  layout warning. A native Windows Clippy run completed with warnings in
+  shared `ph` and `libnode2` code, but none in the Windows platform modules.
+  Strict `-D warnings` is not clean. The GitHub Actions Windows runner result
   remains pending. The
   earlier macOS cross-check stopped in
   `aws-lc-sys` before Rust backend compilation because the Windows SDK/CRT

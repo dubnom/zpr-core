@@ -38,3 +38,6 @@ capnp = { path = "vendor/capnproto-rust/capnp" }
 capnp-futures = { path = "vendor/capnproto-rust/capnp-futures" }
 capnp-rpc = { path = "vendor/capnproto-rust/capnp-rpc" }
 capnpc = { path = "vendor/capnproto-rust/capnpc" }
+
+[patch."https://github.com/org-zpr/zpr-utils.git"]
+zpr-ext = { path = "../zpr-utils-windows-portability/zpr-ext" }

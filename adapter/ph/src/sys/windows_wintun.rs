@@ -710,6 +710,7 @@ mod tests {
     struct FakeState {
         fail_start: bool,
         fail_event: bool,
+        null_event: bool,
         fail_receive: bool,
         fail_send: bool,
         would_block_send: bool,
@@ -756,8 +757,11 @@ mod tests {
         }
 
         fn read_wait_event(&self, _session: usize) -> io::Result<usize> {
-            if self.0.lock().unwrap().fail_event {
+            let state = self.0.lock().unwrap();
+            if state.fail_event {
                 Err(io::Error::other("fake event retrieval failure"))
+            } else if state.null_event {
+                Ok(0)
             } else {
                 Ok(3)
             }
@@ -858,6 +862,20 @@ mod tests {
     }
 
     #[test]
+    fn invalid_adapter_names_are_rejected_before_session_startup() {
+        let api = fake_api(FakeState::default());
+        for name in ["", "adapter\0name"] {
+            assert!(matches!(
+                Session::open(api.clone(), name),
+                Err(error) if error.kind() == io::ErrorKind::InvalidInput
+            ));
+        }
+        let state = api.0.lock().unwrap();
+        assert_eq!(state.session_ends, 0);
+        assert_eq!(state.adapter_closes, 0);
+    }
+
+    #[test]
     fn adapter_is_closed_if_session_start_fails() {
         let api = fake_api(FakeState {
             fail_start: true,
@@ -876,6 +894,23 @@ mod tests {
             ..FakeState::default()
         });
         assert!(Session::open(api.clone(), "existing").is_err());
+        let state = api.0.lock().unwrap();
+        assert_eq!(state.session_ends, 1);
+        assert_eq!(state.adapter_closes, 1);
+    }
+
+    #[test]
+    fn session_and_adapter_close_if_read_wait_event_is_null() {
+        let api = fake_api(FakeState {
+            null_event: true,
+            ..FakeState::default()
+        });
+        assert!(matches!(
+            Session::open(api.clone(), "existing"),
+            Err(error)
+                if error.kind() == io::ErrorKind::Other
+                    && error.to_string() == "Wintun returned a null read-wait event"
+        ));
         let state = api.0.lock().unwrap();
         assert_eq!(state.session_ends, 1);
         assert_eq!(state.adapter_closes, 1);
