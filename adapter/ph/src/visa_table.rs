@@ -31,10 +31,12 @@ pub async fn launch_expiration_worker(asm: std::sync::Arc<Assembly>) {
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         interval.tick().await;
-        asm.visa_table
+        let withdrawn = asm
+            .visa_table
             .write()
             .unwrap()
             .handle_expirations(&asm.peer_table);
+        crate::mgmt::node::withdraw_streams(&asm, withdrawn);
     }
 }
 
@@ -136,11 +138,16 @@ impl Visa {
         })
     }
 
-    /// Remove all forwarding entries associated with this visa
-    pub fn remove_forwarding_entries(&mut self, peer_table: &peer_table::PeerTable) {
+    /// Remove all forwarding entries associated with this visa, returning them
+    /// so the caller can notify the peers that originated those tethers.
+    pub fn remove_forwarding_entries(
+        &mut self,
+        peer_table: &peer_table::PeerTable,
+    ) -> Vec<ForwardingEntry> {
         self.streams
             .drain(..)
-            .for_each(|entry| peer_table.remove_route(entry));
+            .inspect(|entry| peer_table.remove_route(entry.clone()))
+            .collect()
     }
 
     /// Link a forwarding entry to this visa
@@ -332,24 +339,34 @@ impl VisaTable {
         Ok(())
     }
 
-    /// Revoke (or otherwise remove) a visa
+    /// Revoke (or otherwise remove) a visa.
+    ///
+    /// Returns the forwarding entries that were removed; see
+    /// [`crate::mgmt::node::withdraw_streams`].
     pub fn revoke(
         &mut self,
         peer_table: &peer_table::PeerTable,
         visa_id: VisaId,
-    ) -> Result<(), VisaTableError> {
+    ) -> Result<Vec<ForwardingEntry>, VisaTableError> {
         // The only error from `revoke_no_rebuild` is a HashMap::remove miss. If the visa
         // is gone we consider it "revoked".
-        let _ = self.revoke_no_rebuild(peer_table, visa_id);
+        let removed = self
+            .revoke_no_rebuild(peer_table, visa_id)
+            .unwrap_or_default();
         self.rebuild_lookup_table();
 
-        Ok(())
+        Ok(removed)
     }
 
-    /// Remove every expired visa from the table
-    pub fn handle_expirations(&mut self, peer_table: &peer_table::PeerTable) {
+    /// Remove every expired visa from the table, returning the removed
+    /// forwarding entries.
+    pub fn handle_expirations(
+        &mut self,
+        peer_table: &peer_table::PeerTable,
+    ) -> Vec<ForwardingEntry> {
         let current_time = Utc::now();
         let mut removed = false;
+        let mut withdrawn = Vec::new();
         while self
             .timeout_queue
             .peek()
@@ -362,13 +379,16 @@ impl VisaTable {
                 .table
                 .get(&timeout_entry.id)
                 .is_some_and(|visa| DateTime::<Utc>::from(visa.visa.expires) <= current_time)
+                && let Ok(entries) = self.revoke_no_rebuild(peer_table, timeout_entry.id)
             {
-                removed |= self.revoke_no_rebuild(peer_table, timeout_entry.id).is_ok();
+                removed = true;
+                withdrawn.extend(entries);
             }
         }
         if removed {
             self.rebuild_lookup_table();
         }
+        withdrawn
     }
 
     /// Revoke all visas that have any forwarding entry referencing `link_id`.
@@ -389,7 +409,14 @@ impl VisaTable {
     ///
     /// TODO: https://github.com/org-zpr/zpr-core/issues/1281
     ///
-    pub fn revoke_for_link(&mut self, link_id: LinkId, peer_table: &peer_table::PeerTable) {
+    /// Returns the removed forwarding entries on surviving links (entries on
+    /// `link_id` itself are omitted, since that peer is going away).
+    pub fn revoke_for_link(
+        &mut self,
+        link_id: LinkId,
+        peer_table: &peer_table::PeerTable,
+    ) -> Vec<ForwardingEntry> {
+        let mut withdrawn = Vec::new();
         let to_revoke: Vec<VisaId> = self
             .table
             .iter()
@@ -408,23 +435,26 @@ impl VisaTable {
             for visa_id in to_revoke {
                 // Ignore NotFound: the visa may have been concurrently revoked
                 // (e.g., by handle_expirations) between the collect and this loop.
-                let _ = self.revoke_no_rebuild(peer_table, visa_id);
+                if let Ok(entries) = self.revoke_no_rebuild(peer_table, visa_id) {
+                    withdrawn.extend(entries.into_iter().filter(|entry| entry.0 != link_id));
+                }
             }
             self.rebuild_lookup_table();
         }
+        withdrawn
     }
 
     fn revoke_no_rebuild(
         &mut self,
         peer_table: &peer_table::PeerTable,
         visa_id: VisaId,
-    ) -> Result<(), VisaTableError> {
+    ) -> Result<Vec<ForwardingEntry>, VisaTableError> {
         let Some(mut visa) = self.table.remove(&visa_id) else {
             return Err(VisaTableError::NotFound(visa_id));
         };
-        visa.remove_forwarding_entries(peer_table);
+        let removed = visa.remove_forwarding_entries(peer_table);
         info!(target: VISA_MGMT, "Revoked visa {visa_id}");
-        Ok(())
+        Ok(removed)
     }
 
     /// Given a visa ID, look up the visa and return the next hop address.
@@ -741,11 +771,16 @@ mod tests {
 
         std::thread::sleep(one_second);
 
-        visa_table.handle_expirations(&asm.peer_table);
+        let expired = visa_table.handle_expirations(&asm.peer_table);
+        assert!(expired == vec![ForwardingEntry(link_id, tether_id2)]);
         assert_eq!(1, peer_state.pft.len());
 
-        assert!(visa_table.revoke(&asm.peer_table, visa1).is_ok());
+        let revoked = visa_table.revoke(&asm.peer_table, visa1).unwrap();
+        assert!(revoked == vec![ForwardingEntry(link_id, tether_id1)]);
         assert_eq!(0, peer_state.pft.len());
+
+        // Revoking an already-removed visa reports nothing to withdraw.
+        assert!(visa_table.revoke(&asm.peer_table, visa1).unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -892,11 +927,14 @@ mod tests {
             .link_forwarding_entry(visa_id, ForwardingEntry(link_b, tether_b))
             .unwrap();
 
-        visa_table.revoke_for_link(link_a, &asm.peer_table);
+        let withdrawn = visa_table.revoke_for_link(link_a, &asm.peer_table);
 
         assert!(!visa_table.table.contains_key(&visa_id));
         assert_eq!(peer_a.pft.len(), 0);
         assert_eq!(peer_b.pft.len(), 0);
+        // DP-K01: the surviving link's tether must be reported so its adapter
+        // can be told to re-bind; the removed link's entry is not reported.
+        assert!(withdrawn == vec![ForwardingEntry(link_b, tether_b)]);
     }
 
     #[tokio::test]

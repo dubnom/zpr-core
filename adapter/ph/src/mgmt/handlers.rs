@@ -1013,6 +1013,28 @@ pub async fn handle_unbind_indication(asm: &Arc<Assembly>, pkt: Packet) -> Handl
     Ok(())
 }
 
+/// Node -> adapter: the node removed its forwarding entry for one of our
+/// outbound tethers (DP-K01).
+pub async fn handle_stream_id_withdrawal(asm: &Arc<Assembly>, pkt: Packet) -> HandleMgmtResult {
+    let Some(ingress_link_id) = NonZero::new(pkt.metadata().ingress_link_id) else {
+        error!(target: FLOW_MGMT, "coding error: stray packet from unknown source; dropping");
+        return Ok(());
+    };
+
+    let link_type = match asm.peer_table.get(ingress_link_id.get()) {
+        Some(peer_state) => peer_state.link_state_machine.get_link_type(),
+        None => return Err(HandleMgmtError::LinkClosed),
+    };
+
+    match (link_type, ingress_link_id.get()) {
+        (LinkType::AdapterToNode, _) | (LinkType::Internal, DOCK_LINK_ID) => {
+            adapter::withdraw_tether(asm, ingress_link_id, pkt.metadata().ingress_stream_id);
+            Ok(())
+        }
+        _ => Err(HandleMgmtError::MessageNotPermitted),
+    }
+}
+
 fn peer_type_by_id(asm: &Assembly, link_id: NonZero<LinkId>) -> PeerType {
     asm.peer_table
         .inspect(link_id.get(), |ps| ps.peer_type())

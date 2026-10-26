@@ -196,6 +196,27 @@ impl EndpointLookupTable {
 
         Ok(entry)
     }
+
+    /// Remove every active entry bound to `tether_id`, returning how many were
+    /// removed. Pending entries are left alone; they have no tether yet.
+    pub fn remove_active_tether(&self, tether_id: StreamId) -> usize {
+        let mut removed = 0;
+        self.table.retain(|_, entry| match entry {
+            EltEntry::Active(pep) if pep.tether_id == tether_id => {
+                removed += 1;
+                false
+            }
+            _ => true,
+        });
+        removed
+    }
+
+    /// Forget every outbound tether. Tether IDs are scoped to the dock link, so
+    /// none survive a dock-link restart (DP-K01).
+    pub fn clear(&self) {
+        self.table.clear();
+        self.pending.clear();
+    }
 }
 
 pub struct DltPep {
@@ -266,5 +287,56 @@ impl DockLookupTable {
         let new_reader = table.remove((tether_id as usize).wrapping_sub(1));
         std::mem::drop(table);
         self.reader.write(new_reader);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EltEntry, EltPep, EndpointLookupTable};
+    use crate::defs::FiveTuple;
+    use crate::mgmt::core::new_heap_packet;
+    use crate::mgmt::txn_mgr::TxnMgr;
+    use futures::future::FutureExt;
+    use std::sync::Arc;
+
+    fn tuple(source_port: u16) -> FiveTuple {
+        FiveTuple {
+            src_port: source_port,
+            ..FiveTuple::default()
+        }
+    }
+
+    // DP-K01: a node withdrawal must drop only the entries bound to the
+    // withdrawn tether, so the next packet on that flow re-binds.
+    #[test]
+    fn remove_active_tether_drops_only_matching_active_entries() {
+        let mgr = Arc::new(TxnMgr::new());
+        let elt = EndpointLookupTable::new();
+
+        for (port, tether) in [(1, 7), (2, 8)] {
+            let txn = mgr.open().now_or_never().unwrap();
+            elt.insert_pending(tuple(port), new_heap_packet(), &txn)
+                .unwrap();
+            elt.set_active(&tuple(port), EltPep::new(0, tether, None))
+                .unwrap();
+        }
+        let pending_txn = mgr.open().now_or_never().unwrap();
+        elt.insert_pending(tuple(3), new_heap_packet(), &pending_txn)
+            .unwrap();
+
+        assert_eq!(elt.remove_active_tether(7), 1);
+        assert!(elt.get(&tuple(1)).is_none());
+        assert!(matches!(
+            elt.inspect(&tuple(2), |e| matches!(e, EltEntry::Active(p) if p.tether_id == 8)),
+            Some(true)
+        ));
+        assert!(elt.lookup_pending(&pending_txn).is_ok());
+
+        assert_eq!(elt.remove_active_tether(7), 0);
+
+        elt.clear();
+        assert!(elt.get(&tuple(2)).is_none());
+        assert!(elt.get(&tuple(3)).is_none());
+        assert!(elt.lookup_pending(&pending_txn).is_err());
     }
 }

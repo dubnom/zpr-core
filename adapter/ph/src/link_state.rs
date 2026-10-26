@@ -451,7 +451,20 @@ impl LinkStateWrapper {
         if vs_id.is_some() && vs_id.unwrap().get() == self.id {
             return join_set;
         }
-        for addr in self.locked_fsm.lock().unwrap().actor_addresses.drain(..) {
+        let addrs: Vec<IpAddress> =
+            std::mem::take(&mut self.locked_fsm.lock().unwrap().actor_addresses);
+        for addr in addrs {
+            // A replacement adapter may re-authorize at the same address before
+            // this stale link times out; telling the VS about this disconnect
+            // would remove the replacement's actor (DP-K02).
+            let reclaimed = asm.peer_table.find(|(id, peer)| {
+                id.get() != self.id && peer.link_state_machine.has_actor_address(&addr)
+            });
+            if let Some((owner, _)) = reclaimed {
+                info!(target: LINK_STATE, "{}: not deregistering {addr}; now held by {}",
+                    asm.formatted_link_id(self.id), asm.formatted_link_id(owner.get()));
+                continue;
+            }
             debug!(target: LINK_STATE, "Deregistering {addr}");
             join_set.spawn_local(visa_mgmt::actor_disconnect(asm.clone(), addr));
         }
@@ -1781,7 +1794,10 @@ impl LinkStateWrapper {
                 asm.peer_table.clear_peer_state(link_id);
 
                 match self.link_type {
-                    LinkType::AdapterToNode => asm.tun_ctl.set_carrier(false).unwrap(),
+                    LinkType::AdapterToNode => {
+                        asm.tun_ctl.set_carrier(false).unwrap();
+                        asm.elt.clear();
+                    }
                     LinkType::NodeToAdapter => join_set = self.deregister_actor_addresses(asm),
                     _ => {}
                 }

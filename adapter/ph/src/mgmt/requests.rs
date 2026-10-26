@@ -550,6 +550,24 @@ pub fn send_report<'a>(asm: &'a Assembly, link_id: LinkId, report: &'_ str) -> S
     core::send_non_flow_mgmt(asm, link_id, zdp::ZdpPacketType::Report, pkt)
 }
 
+/// Tell an adapter that the node no longer has a forwarding entry for one of
+/// the adapter's ingress tethers, so the adapter should stop using it.
+pub fn send_stream_id_withdrawal<'a>(
+    asm: &'a Assembly,
+    link_id: LinkId,
+    stream_id: StreamId,
+) -> Sent<'a> {
+    debug!(target: ZDP, "{}: sending StreamIdWithdrawal for stream {stream_id}", asm.formatted_link_id(link_id));
+
+    core::send_per_flow_mgmt(
+        asm,
+        link_id,
+        zdp::ZdpPacketType::StreamIdWithdrawal,
+        stream_id,
+        core::new_heap_packet(),
+    )
+}
+
 pub fn send_unbind_egress_stream_request<'a>(
     asm: &'a Assembly,
     link_id: LinkId,

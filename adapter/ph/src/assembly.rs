@@ -315,10 +315,12 @@ impl Assembly {
             debug!(target: PEER_MGMT, "Removing peer {}", self.formatted_link_id(link_id));
         }
         if self.ph_mode == PhMode::Node {
-            self.visa_table
+            let withdrawn = self
+                .visa_table
                 .write()
                 .unwrap()
                 .revoke_for_link(link_id, &self.peer_table);
+            crate::mgmt::node::withdraw_streams(self, withdrawn);
         }
         self.peer_table.remove(link_id);
         info!(target: PEER_MGMT, "Removed peer {}", self.formatted_link_id(link_id));

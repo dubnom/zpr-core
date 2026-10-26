@@ -260,8 +260,11 @@ pub fn handle_revocation(
     asm: &Assembly,
     visa_id: VisaId,
 ) -> Result<(), visa_table::VisaTableError> {
-    asm.visa_table
+    let withdrawn = asm
+        .visa_table
         .write()
         .unwrap()
-        .revoke(&asm.peer_table, visa_id)
+        .revoke(&asm.peer_table, visa_id)?;
+    crate::mgmt::node::withdraw_streams(asm, withdrawn);
+    Ok(())
 }

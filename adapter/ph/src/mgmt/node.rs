@@ -1010,6 +1010,24 @@ fn resolve_next_hop_bind_originator(
     Ok((ingress_link_id, ingress_txn_id))
 }
 
+/// Notify adapters whose ingress tethers were removed from the node's PFT
+/// (by visa revocation, expiry, or ejection for another link) so they drop the
+/// stale ELT entry and re-bind on the next packet. Without this, an adapter
+/// keeps sending on a stream ID the node no longer knows (DP-K01).
+///
+/// Must be called without holding the visa table lock.
+pub fn withdraw_streams(asm: &Assembly, entries: impl IntoIterator<Item = ForwardingEntry>) {
+    for ForwardingEntry(link_id, stream_id) in entries {
+        let is_adapter = asm
+            .peer_table
+            .get(link_id)
+            .is_some_and(|peer| matches!(peer.peer_type(), PeerType::Adapter));
+        if is_adapter {
+            requests::send_stream_id_withdrawal(asm, link_id, stream_id).enqueue();
+        }
+    }
+}
+
 pub fn unbind_stream(asm: &Arc<Assembly>, ingress_link_id: NonZero<LinkId>, stream_id: StreamId) {
     let Some(peer_table) = asm.peer_table.get(ingress_link_id.get()) else {
         return;

@@ -98,6 +98,16 @@ pub fn unbind_stream(asm: &Arc<Assembly>, dock_link_id: NonZero<LinkId>, stream_
     asm.dlt.remove(stream_id)
 }
 
+/// The node withdrew one of our outbound tethers; forget it so the next packet
+/// for that flow requests a fresh bind.
+pub fn withdraw_tether(asm: &Arc<Assembly>, dock_link_id: NonZero<LinkId>, tether_id: StreamId) {
+    let removed = asm.elt.remove_active_tether(tether_id);
+    debug!(
+        target: FLOW_MGMT,
+        "{}: stream ID withdrawal for tether {tether_id}: removed {removed} ELT entr(ies)",
+        asm.formatted_link_id(dock_link_id.get()));
+}
+
 #[derive(Debug)]
 pub enum InstallTetherError {
     NoSuchTransaction,
