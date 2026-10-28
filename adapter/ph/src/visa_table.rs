@@ -444,6 +444,44 @@ impl VisaTable {
         withdrawn
     }
 
+    /// Revoke every visa that was issued with the removed peer's A2A DH public
+    /// key, including reverse-direction visas that have no stream on its link.
+    ///
+    /// An adapter that re-docks generates a new key. A surviving visa that
+    /// embeds the old key would be matched for new flows, and the far adapter
+    /// would derive a stale shared secret and drop the traffic (MICV failure).
+    ///
+    /// Returns the removed forwarding entries on links other than `link_id`.
+    pub fn revoke_for_a2a_key(
+        &mut self,
+        link_id: LinkId,
+        key: &x25519_dalek::PublicKey,
+        peer_table: &peer_table::PeerTable,
+    ) -> Vec<ForwardingEntry> {
+        let key = key.as_bytes().as_slice();
+        let to_revoke: Vec<VisaId> = self
+            .table
+            .iter()
+            .filter_map(|(visa_id, visa)| {
+                let keys = &visa.visa.dock_pep.as_ref()?.session_key;
+                (*visa_id >= config::MIN_VISA_ID
+                    && (keys.ingress_key.as_slice() == key || keys.egress_key.as_slice() == key))
+                    .then_some(*visa_id)
+            })
+            .collect();
+        let mut withdrawn = Vec::new();
+        if !to_revoke.is_empty() {
+            info!(target: VISA_MGMT, "revoking {} visa(s) issued with the A2A key of removed link {link_id}", to_revoke.len());
+            for visa_id in to_revoke {
+                if let Ok(entries) = self.revoke_no_rebuild(peer_table, visa_id) {
+                    withdrawn.extend(entries.into_iter().filter(|entry| entry.0 != link_id));
+                }
+            }
+            self.rebuild_lookup_table();
+        }
+        withdrawn
+    }
+
     fn revoke_no_rebuild(
         &mut self,
         peer_table: &peer_table::PeerTable,
@@ -820,6 +858,33 @@ mod tests {
 
         assert!(!visa_table.table.contains_key(&visa_id));
         assert_eq!(peer_state.pft.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_revoke_for_a2a_key_revokes_visas_with_stale_key() {
+        let mut builder = TestAssemblyBuilder::new();
+        builder.visa_table = Some(VisaTable::new());
+        let asm = Arc::new(create_assembly(builder));
+        let stale = x25519_dalek::PublicKey::from([7u8; 32]);
+        let fresh = x25519_dalek::PublicKey::from([9u8; 32]);
+
+        let mut visa_table = asm.visa_table.write().unwrap();
+        let with_keys = |id: u64, ingress: &x25519_dalek::PublicKey, egress: &x25519_dalek::PublicKey| {
+            let mut v = new_vsapi_visa_tcp_default(id, DateTime::<Utc>::MAX_UTC.into());
+            let pep = v.dock_pep.as_mut().unwrap();
+            pep.session_key.ingress_key = ingress.as_bytes().to_vec();
+            pep.session_key.egress_key = egress.as_bytes().to_vec();
+            v
+        };
+        visa_table.insert_visa(with_keys(1000, &fresh, &stale)).unwrap();
+        visa_table.insert_visa(with_keys(1001, &stale, &fresh)).unwrap();
+        visa_table.insert_visa(with_keys(1002, &fresh, &fresh)).unwrap();
+
+        visa_table.revoke_for_a2a_key(99, &stale, &asm.peer_table);
+
+        assert!(!visa_table.table.contains_key(&1000));
+        assert!(!visa_table.table.contains_key(&1001));
+        assert!(visa_table.table.contains_key(&1002));
     }
 
     #[tokio::test]

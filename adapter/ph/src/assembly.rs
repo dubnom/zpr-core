@@ -315,11 +315,16 @@ impl Assembly {
             debug!(target: PEER_MGMT, "Removing peer {}", self.formatted_link_id(link_id));
         }
         if self.ph_mode == PhMode::Node {
-            let withdrawn = self
-                .visa_table
-                .write()
-                .unwrap()
-                .revoke_for_link(link_id, &self.peer_table);
+            let peer_key = self
+                .peer_table
+                .inspect(link_id, |ps| *ps.a2a_dh_pubkey.get())
+                .flatten();
+            let mut visa_table = self.visa_table.write().unwrap();
+            let mut withdrawn = visa_table.revoke_for_link(link_id, &self.peer_table);
+            if let Some(key) = peer_key {
+                withdrawn.extend(visa_table.revoke_for_a2a_key(link_id, &key, &self.peer_table));
+            }
+            drop(visa_table);
             crate::mgmt::node::withdraw_streams(self, withdrawn);
         }
         self.peer_table.remove(link_id);
