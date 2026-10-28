@@ -159,6 +159,8 @@ pub enum LinkEvent {
     ReceivedTerminateAck,
     ReceivedDisconnectAck, // from visa service
     Close(TerminateReason),
+    /// The adapter's periodic re-authentication timer fired.
+    Reauthenticate,
     CloseDone,
     Error,
     Timeout { logical_clock: u64 },
@@ -241,6 +243,8 @@ pub struct LinkStateMachine {
     /// Handle to an outstanding echo/keepalive task; used only during Active.
     /// Instant is time at which the echo was sent.
     echo_handle: Option<(Instant, tokio::task::AbortHandle)>,
+    /// Adapter dock link only: pending periodic re-authentication timer for this activation.
+    reauth_handle: Option<tokio::task::AbortHandle>,
     shutting_down: bool, // only ever goes from False -> True once
 }
 
@@ -260,6 +264,7 @@ impl LinkStateMachine {
             node_hello_request_received: false,
             node_hello_response_received: false,
             echo_handle: None,
+            reauth_handle: None,
             shutting_down: false,
         }
     }
@@ -271,6 +276,7 @@ impl LinkStateMachine {
         self.state = new_state;
         self.last_state_change = std::time::Instant::now();
         self.cancel_timeout();
+        self.reauth_handle.take().inspect(|h| h.abort());
         self.timeout_count = 0;
     }
 
@@ -524,6 +530,7 @@ impl LinkStateWrapper {
             LinkEvent::ReceivedTerminateAck => self.process_terminate_ack(asm),
             LinkEvent::ReceivedDisconnectAck => self.process_disconnect_ack(asm),
             LinkEvent::Close(code) => self.initiate_close(asm, code),
+            LinkEvent::Reauthenticate => self.process_reauthenticate(asm),
             LinkEvent::CloseDone => Ok(self.complete_close(asm)),
             LinkEvent::Error => self.process_error_response(asm),
             LinkEvent::Timeout { logical_clock } => self.process_timeout(asm, logical_clock),
@@ -1716,6 +1723,17 @@ impl LinkStateWrapper {
         self.maybe_disconnect_visa_service_client(asm, true, reason)
     }
 
+    /// Close an active dock link so the normal restart path re-authenticates before the
+    /// visa service's actor authentication expires. The close is orderly (terminate and
+    /// ack) so the node deregisters the old session before the restarted link registers.
+    fn process_reauthenticate(&self, asm: &Arc<Assembly>) -> Result<(), LinkStateError> {
+        if self.link_type != LinkType::AdapterToNode || self.get_state() != LinkState::Active {
+            return Ok(());
+        }
+        info!(target: LINK_STATE, "{} periodic re-authentication: closing dock link to renew", asm.formatted_link_id(self.id));
+        self.initiate_close(asm, TerminateReason::Other)
+    }
+
     fn process_disconnect_ack(&self, asm: &Arc<Assembly>) -> Result<(), LinkStateError> {
         let locked_fsm = self.locked_fsm.lock().unwrap();
         match (self.link_type, locked_fsm.state) {
@@ -1987,6 +2005,18 @@ impl LinkStateWrapper {
             asm.report_node_link_status(self.id, true);
         }
 
+        if let (LinkType::AdapterToNode, Some(interval)) =
+            (self.link_type, asm.config.get().reauth_interval)
+        {
+            let link_id = self.id;
+            let task_asm = asm.clone();
+            let jh = tokio::task::spawn_local(async move {
+                tokio::time::sleep(interval).await;
+                let _ = task_asm.process_link_state_event(link_id, LinkEvent::Reauthenticate);
+            });
+            locked_fsm.reauth_handle = Some(jh.abort_handle());
+        }
+
         // kick off our keepalive mechanism
         locked_fsm.echo_handle.take().inspect(|(_, h)| h.abort()); // should already be None (indicating no echo outstanding) but let's be sure
         self.set_timeout(asm, &mut locked_fsm, config::DEFAULT_KEEP_ALIVE_TIMEOUT);
@@ -2137,6 +2167,44 @@ mod tests {
         link.process_hello_response(&asm, crate::zdp::ResponseCode::Success, None, None)
             .unwrap();
         assert_eq!(link.get_state(), LinkState::Active);
+    }
+
+    #[test]
+    fn reauthenticate_ignored_unless_active_adapter_dock_link() {
+        let asm = Arc::new(crate::assembly::test::create_assembly(
+            crate::assembly::test::TestAssemblyBuilder::new(),
+        ));
+        let node_link = super::LinkStateWrapper::new(1, super::LinkType::NodeToNode);
+        node_link.locked_fsm.lock().unwrap().set_state(LinkState::Active);
+        node_link.process_reauthenticate(&asm).unwrap();
+        assert_eq!(node_link.get_state(), LinkState::Active);
+
+        let dock = super::LinkStateWrapper::new(2, super::LinkType::AdapterToNode);
+        dock.process_reauthenticate(&asm).unwrap();
+        assert_eq!(dock.get_state(), LinkState::Inactive);
+    }
+
+    #[tokio::test]
+    async fn active_adapter_dock_link_arms_and_clears_reauth_timer() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let asm = Arc::new(crate::assembly::test::create_assembly(
+                    crate::assembly::test::TestAssemblyBuilder::new(),
+                ));
+                let dock = super::LinkStateWrapper::new(2, super::LinkType::AdapterToNode);
+                let guard = dock.locked_fsm.lock().unwrap();
+                dock.run_active(&asm, guard).unwrap();
+                assert!(dock.locked_fsm.lock().unwrap().reauth_handle.is_some());
+                dock.locked_fsm.lock().unwrap().set_state(LinkState::Closing);
+                assert!(dock.locked_fsm.lock().unwrap().reauth_handle.is_none());
+
+                let node_link = super::LinkStateWrapper::new(3, super::LinkType::NodeToNode);
+                let guard = node_link.locked_fsm.lock().unwrap();
+                node_link.run_active(&asm, guard).unwrap();
+                assert!(node_link.locked_fsm.lock().unwrap().reauth_handle.is_none());
+            })
+            .await;
     }
 
     #[test]

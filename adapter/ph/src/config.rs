@@ -50,6 +50,11 @@ pub const DEFAULT_ZDPR_RETRY_LIMIT: u8 = 3;
 pub const DEFAULT_DENIED_FLOW_BACKOFF_MS: u64 = 1_000;
 pub const MAX_DENIED_FLOW_BACKOFF_MS: u64 = 60_000;
 
+/// The visa service issues actor authentication that lasts 4 hours and cannot refresh it
+/// without a new authentication, so an adapter re-docks well before then.
+pub const DEFAULT_REAUTH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3 * 60 * 60);
+pub const MIN_REAUTH_INTERVAL_SECS: u64 = 60;
+
 pub const LINK_HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub const DEFAULT_TERMINATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -150,6 +155,10 @@ pub struct Config {
 
     /// Node-only, bounded local suppression window after an explicit visa denial.
     pub denied_flow_backoff_ms: u64,
+
+    /// Adapter-only: how long a docked link lives before the adapter closes it and
+    /// re-authenticates. `None` disables periodic re-authentication.
+    pub reauth_interval: Option<std::time::Duration>,
 
     /// Path to a PEM file containing the Certificate Authority certificate.
     /// Optional and if present is used by the link management system to verify passed noise certificates.
@@ -533,6 +542,18 @@ impl Config {
             }
         }
 
+        if let Some(secs) = config.reauth_interval_secs {
+            self.reauth_interval = match secs {
+                0 => None,
+                s if s < MIN_REAUTH_INTERVAL_SECS => {
+                    return Err(ArgsError::ParseError(format!(
+                        "adapter.reauth_interval_secs must be 0 or at least {MIN_REAUTH_INTERVAL_SECS}"
+                    )));
+                }
+                s => Some(std::time::Duration::from_secs(s)),
+            };
+        }
+
         if let Some(bootstrap_key_file) = &config.bootstrap_key {
             if bootstrap_key_file.is_relative() {
                 self.bootstrap_key_path = Some(base_dir.join(bootstrap_key_file));
@@ -772,6 +793,7 @@ impl Default for Config {
             node_peers: Vec::new(),
             local_vs_dock: true,
             denied_flow_backoff_ms: DEFAULT_DENIED_FLOW_BACKOFF_MS,
+            reauth_interval: Some(DEFAULT_REAUTH_INTERVAL),
             auth_private_key: None,
             tun_if: None,
             logging: Vec::new(),
@@ -861,6 +883,8 @@ pub struct AdapterConfigSection {
     pub bootstrap_key: Option<PathBuf>,
     pub dns_proxy_listen: Option<SocketAddr>,
     pub dns_proxy_server: Option<SocketAddr>,
+    /// Seconds between periodic re-authentications (0 disables). Default 10800.
+    pub reauth_interval_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1039,6 +1063,27 @@ mod test {
     }
 
     #[test]
+    fn test_reauth_interval_config() {
+        let section = |secs| AdapterConfigSection {
+            name: None,
+            node_addr: None,
+            bootstrap_key: None,
+            dns_proxy_listen: None,
+            dns_proxy_server: None,
+            reauth_interval_secs: secs,
+        };
+        let mut config = Config::default();
+        assert_eq!(config.reauth_interval, Some(DEFAULT_REAUTH_INTERVAL));
+        config.set_from_adapter(&section(None), Path::new(".")).unwrap();
+        assert_eq!(config.reauth_interval, Some(DEFAULT_REAUTH_INTERVAL));
+        config.set_from_adapter(&section(Some(600)), Path::new(".")).unwrap();
+        assert_eq!(config.reauth_interval, Some(std::time::Duration::from_secs(600)));
+        assert!(config.set_from_adapter(&section(Some(5)), Path::new(".")).is_err());
+        config.set_from_adapter(&section(Some(0)), Path::new(".")).unwrap();
+        assert_eq!(config.reauth_interval, None);
+    }
+
+    #[test]
     fn test_dns_proxy_config_requires_loopback_and_complete_addresses() {
         let mut config = Config::default();
         assert!(
@@ -1050,6 +1095,7 @@ mod test {
                         bootstrap_key: None,
                         dns_proxy_listen: Some("0.0.0.0:5353".parse().unwrap()),
                         dns_proxy_server: Some("[fd00:1::53]:53".parse().unwrap()),
+                        reauth_interval_secs: None,
                     },
                     Path::new(".")
                 )
@@ -1065,6 +1111,7 @@ mod test {
                         bootstrap_key: None,
                         dns_proxy_listen: Some("127.0.0.1:5353".parse().unwrap()),
                         dns_proxy_server: Some("127.0.0.1:53".parse().unwrap()),
+                        reauth_interval_secs: None,
                     },
                     Path::new(".")
                 )
@@ -1080,6 +1127,7 @@ mod test {
                         bootstrap_key: None,
                         dns_proxy_listen: Some("127.0.0.1:5353".parse().unwrap()),
                         dns_proxy_server: None,
+                        reauth_interval_secs: None,
                     },
                     Path::new(".")
                 )
