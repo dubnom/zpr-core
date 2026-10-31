@@ -399,7 +399,7 @@ struct AuthReq {
 /// The blob should be passed to the Node which will forward it to the visa service.
 impl OAuthRsa {
     /// Create a new OAuthRsa object.
-    /// - `client_id` is the adapter CN
+    /// - `client_id` is the explicitly configured registry asset ID, or the adapter CN for legacy configurations
     /// - `private_key` is the RSA private key used to sign the nonce
     pub fn new(client_id: &str, private_key: Arc<RsaKeyPair>, tls_ca: Certificate) -> Self {
         OAuthRsa {
@@ -431,7 +431,7 @@ impl OAuthRsa {
             code: auth_code,
             pkce: String::new(),
             client_id: self.client_id.clone(),
-            asa: service_addr.to_string(),
+            asa: service_addr.ip().to_string(),
         })
     }
 
@@ -642,6 +642,127 @@ mod test {
         key_path.push("rsa-key.pem");
         let key = load_rsa_key(&std::fs::read(key_path).unwrap()).unwrap();
         OAuthRsa::new("adapter.example", Arc::new(key), tls_ca)
+    }
+
+    #[tokio::test]
+    async fn oauth_auth_code_issuer_is_an_ip_address_not_a_socket_address() {
+        let (tls_ca, cert, private_key) = test_tls_material(BAS_TLS_HOST);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let tls = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.into()], private_key)
+            .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(tls));
+        let server = tokio::spawn(async move {
+            let body = format!(r#"{{"nonce":"{}"}}"#, BASE64_STANDARD.encode([1u8; 32]));
+            for (method, response) in [
+                (
+                    "GET",
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    ),
+                ),
+                (
+                    "POST",
+                    concat!(
+                        "HTTP/1.1 302 Found\r\n",
+                        "Location: https://auth.zpr/?code=issuer-format-test\r\n",
+                        "Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .into(),
+                ),
+            ] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = acceptor.accept(stream).await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 1024];
+                let header_end = loop {
+                    if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert!(count > 0 && request.len() + count <= 8192);
+                    request.extend_from_slice(&buffer[..count]);
+                };
+                assert!(request.starts_with(format!("{method} ").as_bytes()));
+                let length: usize = if method == "GET" {
+                    0
+                } else {
+                    String::from_utf8_lossy(&request[..header_end])
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(str::trim)
+                                .map(str::to_owned)
+                        })
+                        .unwrap()
+                        .parse()
+                        .unwrap()
+                };
+                assert!(header_end + length <= 8192);
+                while request.len() < header_end + length {
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert!(count > 0 && request.len() + count <= 8192);
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+        });
+        let blob = test_oauth(tls_ca)
+            .authenticate(address, "127.0.0.1".parse().unwrap())
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(blob.asa, address.ip().to_string());
+        assert_eq!(blob.asa.parse::<std::net::IpAddr>().unwrap(), address.ip());
+        assert_eq!(blob.code, "issuer-format-test");
+        assert_eq!(blob.client_id, "adapter.example");
+    }
+
+    #[tokio::test]
+    async fn test_finalized_registry_identity_is_independent_of_adapter_display_name() {
+        let (_, cert, private_key) = test_tls_material(BAS_TLS_HOST);
+        let mut random = [0u8; 16];
+        aws_lc_rs::rand::fill(&mut random).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "zpr-bas-client-id-{}.pem",
+            BASE64_STANDARD.encode(random).replace('/', "_")
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let pem = format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            BASE64_STANDARD.encode(&cert)
+        );
+        std::io::Write::write_all(&mut file, pem.as_bytes()).unwrap();
+        drop(file);
+        let mut config = crate::config::Config::default();
+        config.name = "finance-client".into();
+        config.bas_client_id = Some("velocity-machine-03-finance-client".into());
+        config.bas_key_path =
+            Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/rsa-key.pem"));
+        config.bas_tls_ca_path = Some(path.clone());
+        let result = config.finalize();
+        std::fs::remove_file(path).unwrap();
+        result.unwrap();
+        assert_eq!(config.name, "finance-client");
+        let oauth = config.rsaoauth.unwrap();
+        assert_eq!(oauth.client_id, "velocity-machine-03-finance-client");
+        let (address, server) = start_test_auth_server(cert, private_key).await;
+        let nonce = oauth
+            .preauthorize(address, "127.0.0.1".parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(nonce, vec![1u8; 32]);
+        server.await.unwrap();
     }
 
     #[test]

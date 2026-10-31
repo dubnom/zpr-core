@@ -362,7 +362,9 @@ fn run(
         }
     };
     let tun_interface_name = tun_devs[0].name().to_owned();
-    let tun_ctl = Box::new(tun_ctl::TunCtlImpl::new(tun_devs[0].clone()));
+    let tun_ctl = Box::new(
+        tun_ctl::TunCtlImpl::new(tun_devs[0].clone()).with_route_table(config.tun_route_table),
+    );
 
     // Node must be set ON (adapter will be turned on as part of finishing hello)
     // TODO: There is more subtlety here, see issue ( https://github.com/org-zpr/zpr-core/issues/937 )

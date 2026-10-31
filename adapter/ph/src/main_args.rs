@@ -92,6 +92,10 @@ pub struct CommonArgs {
     #[arg(long, short = 'i', value_name = "DEVICE")]
     pub tun_if: Option<String>,
 
+    /// Linux-only dedicated IPv6 source-routing table (1-252) for this adapter's TUN.
+    #[arg(long, value_name = "TABLE", value_parser = clap::value_parser!(u32).range(1..=252))]
+    pub tun_route_table: Option<u32>,
+
     /// ZPR address (no port) of the adapter (must match your TUN address if it has one)
     #[arg(long, short = 'z')]
     pub zpr_addr: Option<Vec<IpAddr>>,

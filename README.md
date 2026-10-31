@@ -68,6 +68,23 @@ To run the ZPRnet you need at least:
 
 ## How to setup a ZPRnet
 
+### Multiple Linux adapters in one network namespace
+
+An adapter may explicitly set `--tun-route-table 100` (or
+`global.tun_route_table = 100` in TOML). Allocate a different dedicated table
+in `1-252` for each adapter; this option is Linux-only and defaults to off.
+For every temporary authentication or granted IPv6 address, PH installs an
+exact `/128` source rule at priority `10000 + table`, with a default route
+through that adapter's TUN in the dedicated table. Clearing an address removes
+only its matching rule. Route-command failures fail the address transition
+instead of continuing authentication through another adapter.
+
+This prevents a BAS HTTPS request bound to one adapter's temporary address
+from leaving through another adapter's connected ZPR route. It does not grant
+access or replace policy. The caller owns the dedicated table and interface
+lifecycle; deleting an isolated container removes that namespace's remaining
+routes and rules. Existing configurations retain their routing behavior.
+
 ### Peer reconnects
 
 Visa API TCP dials have a ten-second deadline rather than waiting for the
@@ -152,6 +169,23 @@ that connect in and access the services.
 
 
 ### Create authentication keys to share with the visa service
+
+For enrollment-backed BAS authentication, the protected adapter configuration
+may explicitly set `authentication.bas_client_id` to its registry asset ID.
+It is independent of `--name` and the Noise CN; changing a display name must not
+change the enrollment subject. Omission retains legacy CN-based BAS behavior.
+Auth-code blobs identify the authentication service by its IP address, not its
+HTTPS socket address. The node also accepts legacy IP-and-port representations
+when translating to the typed VS request; malformed issuers return an explicit
+error rather than silently becoming `0.0.0.0`. TLS still uses the signed service
+port and verifies `auth.zpr`; issuer parsing does not relax VS policy checks.
+An explicit ID requires `bas_key` and cannot be combined with bootstrap
+authentication. BAS still verifies the retained runtime key and approved
+registry record; choosing an ID does not grant authority.
+
+An authentication-only handoff must include the required empty `[global]` and
+`[adapter]` tables alongside `[authentication]`; supply name, node, overlay CA,
+and other required runtime settings through the ordinary CLI/configuration.
 
 In order to connect to the initial ZPRnet each adapter needs to share an
 RSA key with the visa service.  This is done via policy.  Since we are

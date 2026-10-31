@@ -174,6 +174,9 @@ pub struct Config {
     /// should be left as None so that the kernal can pick a free one.
     pub tun_if: Option<String>,
 
+    /// Explicit Linux adapter-owned IPv6 source-routing table.
+    pub tun_route_table: Option<u32>,
+
     /// Enable debug logging for specified targets, or ALL
     pub logging: Vec<(String, String)>,
 
@@ -197,6 +200,9 @@ pub struct Config {
 
     /// Resolved path to the BAS RSA key file; used by finalize() to construct `rsaoauth`.
     pub bas_key_path: Option<PathBuf>,
+
+    /// Enrollment registry identity; independent of the adapter display name.
+    pub bas_client_id: Option<String>,
 
     /// Private CA certificate for the `auth.zpr` HTTPS endpoint.
     pub bas_tls_ca_path: Option<PathBuf>,
@@ -317,12 +323,20 @@ impl Config {
     /// Construct auth objects from stored key paths, using the resolved CN.
     /// Must be called after all name sources (config file and CLI) have been merged.
     pub fn finalize(&mut self) -> Result<(), ArgsError> {
+        if self.bas_client_id.is_some()
+            && (self.bas_key_path.is_none() || self.bootstrap_key_path.is_some())
+        {
+            return Err(ArgsError::ParseError(
+                "authentication.bas_client_id requires BAS authentication without a bootstrap key"
+                    .into(),
+            ));
+        }
         if let Some(path) = self.bootstrap_key_path.clone() {
             let cn = self.get_noise_cn()?;
             self.bootstrap = Some(RsaBootstrapAuth::new(&cn, &path)?);
         }
         if let Some(path) = self.bas_key_path.clone() {
-            let cn = self.get_noise_cn()?;
+            let client_id = self.bas_authentication_client_id()?;
             let tls_ca_path = self.bas_tls_ca_path.as_ref().ok_or_else(|| {
                 ArgsError::ParseError(
                     "authentication.tls_ca_file is required with authentication.bas_key".into(),
@@ -354,14 +368,40 @@ impl Config {
                     e
                 ))
             })?;
-            self.rsaoauth = Some(OAuthRsa::new(&cn, Arc::new(priv_key), tls_ca));
+            self.rsaoauth = Some(OAuthRsa::new(&client_id, Arc::new(priv_key), tls_ca));
         }
         Ok(())
+    }
+
+    fn bas_authentication_client_id(&self) -> Result<String, ArgsError> {
+        match &self.bas_client_id {
+            Some(id)
+                if !id.is_empty()
+                    && id.len() <= 256
+                    && id.trim() == id
+                    && !id.contains(['\0', '\r', '\n']) =>
+            {
+                Ok(id.clone())
+            }
+            Some(_) => Err(ArgsError::ParseError(
+                "authentication.bas_client_id must be a nonempty registry asset ID of at most 256 bytes without surrounding whitespace or NUL/CR/LF".into(),
+            )),
+            None => self.get_noise_cn(),
+        }
     }
 
     // Check that the required bits are present based on mode.
     // Also checks that the various files exist.
     pub fn check_valid(&self, mode: PhMode) -> Result<(), ArgsError> {
+        if let Some(table) = self.tun_route_table {
+            if !cfg!(target_os = "linux") || mode != PhMode::Adapter || !(1..=252).contains(&table)
+            {
+                return Err(ArgsError::ParseError(
+                    "tun_route_table requires a Linux adapter and a dedicated table in 1-252"
+                        .into(),
+                ));
+            }
+        }
         if self.control_path.as_os_str().is_empty() {
             return Err("control_path".arg_missing());
         }
@@ -481,6 +521,9 @@ impl Config {
         if let Some(tun_if) = &config.tun_if {
             self.tun_if = Some(tun_if.clone());
         }
+        if let Some(table) = config.tun_route_table {
+            self.tun_route_table = Some(table);
+        }
         if let Some(actor_addr) = &config.zpr_addr {
             self.zpr_addr.extend(&*actor_addr);
         }
@@ -549,6 +592,9 @@ impl Config {
         base_dir: &Path,
     ) -> Result<(), ArgsError> {
         if let Some(config) = config {
+            if let Some(client_id) = &config.bas_client_id {
+                self.bas_client_id = Some(client_id.clone());
+            }
             if let Some(bas_key) = &config.bas_key {
                 if bas_key.is_relative() {
                     self.bas_key_path = Some(base_dir.join(bas_key));
@@ -726,6 +772,9 @@ impl Config {
         if let Some(tun_if) = &common.tun_if {
             self.tun_if = Some(tun_if.clone());
         }
+        if let Some(table) = common.tun_route_table {
+            self.tun_route_table = Some(table);
+        }
         if let Some(addrs) = &common.zpr_addr {
             self.zpr_addr.extend(addrs);
         }
@@ -774,6 +823,7 @@ impl Default for Config {
             denied_flow_backoff_ms: DEFAULT_DENIED_FLOW_BACKOFF_MS,
             auth_private_key: None,
             tun_if: None,
+            tun_route_table: None,
             logging: Vec::new(),
             node_addr: None,
             dns_proxy: None,
@@ -782,6 +832,7 @@ impl Default for Config {
             rsaoauth: None,
             bootstrap_key_path: None,
             bas_key_path: None,
+            bas_client_id: None,
             bas_tls_ca_path: None,
             batch_io_engine: batch_io::AUTO_ENGINE_NAME.to_owned(),
             km_impl: KM_ID_NOISE,
@@ -848,6 +899,7 @@ pub struct GlobalConfigSection {
     pub certificate_file: Option<PathBuf>,
     pub private_key_file: Option<PathBuf>,
     pub tun_if: Option<String>,
+    pub tun_route_table: Option<u32>,
     pub zpr_addr: Option<Vec<IpAddr>>,
     pub logging: Option<Vec<(String, String)>>,
     pub io_engine: Option<String>,
@@ -873,6 +925,7 @@ pub struct DnsProxyConfig {
 pub struct AuthenticationConfigSection {
     // TODO move this here: pub bootstrap_key: Option<PathBuf>,
     bas_key: Option<PathBuf>,
+    bas_client_id: Option<String>,
     tls_ca_file: Option<PathBuf>,
     auth_private_key: Option<PathBuf>,
 }
@@ -979,6 +1032,69 @@ mod test {
     use super::*;
 
     #[test]
+    fn test_enrollment_authentication_config_preserves_registry_client_id() {
+        let document = r#"
+[global]
+[adapter]
+[authentication]
+bas_key = "runtime-auth.key"
+tls_ca_file = "runtime-auth-ca.pem"
+bas_client_id = "velocity-machine-03-finance-client"
+"#;
+        let parsed: AdapterConfig = toml::from_str(document).unwrap();
+        let mut config = Config::default();
+        config.name = "finance-client".into();
+        config
+            .set_from_authentication(&parsed.authentication, Path::new("/private/endpoint"))
+            .unwrap();
+        assert_eq!(
+            config.bas_authentication_client_id().unwrap(),
+            "velocity-machine-03-finance-client"
+        );
+        assert_eq!(config.name, "finance-client");
+        assert_eq!(
+            config.bas_key_path,
+            Some(PathBuf::from("/private/endpoint/runtime-auth.key"))
+        );
+        assert!(parsed.global.control_path.is_none());
+        assert!(parsed.adapter.node_addr.is_none());
+        config.bas_client_id = None;
+        assert_eq!(
+            config.bas_authentication_client_id().unwrap(),
+            "finance-client"
+        );
+    }
+
+    #[test]
+    fn test_explicit_bas_client_id_cannot_be_empty_or_change_authentication_mode() {
+        let mut config = Config::default();
+        config.name = "display-name".into();
+        for id in ["", " leading", "trailing ", "a\nb", "a\rb", "a\0b"] {
+            config.bas_client_id = Some(id.into());
+            assert!(config.bas_authentication_client_id().is_err(), "{id:?}");
+        }
+        config.bas_client_id = Some("x".repeat(257));
+        assert!(config.bas_authentication_client_id().is_err());
+        config.bas_client_id = Some("velocity-machine-03-controller".into());
+        assert!(
+            config
+                .finalize()
+                .unwrap_err()
+                .to_string()
+                .contains("requires BAS")
+        );
+        config.bas_key_path = Some(PathBuf::from("unused-bas.key"));
+        config.bootstrap_key_path = Some(PathBuf::from("unused-bootstrap.key"));
+        assert!(
+            config
+                .finalize()
+                .unwrap_err()
+                .to_string()
+                .contains("without a bootstrap")
+        );
+    }
+
+    #[test]
     fn test_management_datapath_queue_default_is_larger_than_control_queues() {
         let topology = TopologyConfig::default();
 
@@ -1025,6 +1141,7 @@ mod test {
             .set_from_authentication(
                 &Some(AuthenticationConfigSection {
                     bas_key: None,
+                    bas_client_id: None,
                     tls_ca_file: Some(PathBuf::from("auth-service-ca.crt")),
                     auth_private_key: None,
                 }),

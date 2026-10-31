@@ -104,8 +104,13 @@ pub fn build_connect_request(
         AuthBlob::AuthCode(ac) => vsapi_types::AuthBlob::AC(vsapi_types::AuthCodeBlob {
             asa_addr: ac
                 .asa
-                .parse()
-                .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+                .parse::<IpAddr>()
+                .or_else(|_| ac.asa.parse::<std::net::SocketAddr>().map(|addr| addr.ip()))
+                .map_err(|error| {
+                    LinkStateError::InvalidOperation(format!(
+                        "invalid authentication-service issuer address: {error}"
+                    ))
+                })?,
             code: ac.code.clone(),
             pkce: ac.pkce.clone(),
             client_id: ac.client_id.clone(),
@@ -197,6 +202,49 @@ pub fn insert_visa(
 mod tests {
     use super::*;
     use crate::assembly::test::{TestAssemblyBuilder, create_assembly};
+
+    #[test]
+    fn auth_code_connect_request_preserves_ip_and_legacy_socket_issuers() {
+        let asm = Arc::new(create_assembly(TestAssemblyBuilder::new()));
+        for (address, expected) in [
+            ("192.0.2.1", "192.0.2.1"),
+            ("192.0.2.1:24996", "192.0.2.1"),
+            ("fd5a:5052:adda:1::1", "fd5a:5052:adda:1::1"),
+            ("[fd5a:5052:adda:1::1]:24996", "fd5a:5052:adda:1::1"),
+        ] {
+            let blob = AuthBlob::AuthCode(crate::auth::ZdpAuthCodeBlob {
+                blob_type: crate::auth::BLOB_TYPE_AC.into(),
+                asa: address.into(),
+                client_id: "velocity-machine-03-controller".into(),
+                code: "test-code".into(),
+                pkce: String::new(),
+            });
+            let request = build_connect_request(&asm, IpAddress::UNSPECIFIED, &blob, None).unwrap();
+            let vsapi_types::AuthBlob::AC(code) = &request.blobs[0] else {
+                panic!("expected an auth-code blob");
+            };
+            assert_eq!(code.asa_addr, expected.parse::<IpAddr>().unwrap());
+            assert_eq!(code.client_id, "velocity-machine-03-controller");
+        }
+    }
+
+    #[test]
+    fn auth_code_connect_request_rejects_malformed_issuer_without_unspecified_fallback() {
+        let asm = Arc::new(create_assembly(TestAssemblyBuilder::new()));
+        for address in ["", "not-an-address", "auth.zpr:24996", "[::1]:invalid"] {
+            let blob = AuthBlob::AuthCode(crate::auth::ZdpAuthCodeBlob {
+                blob_type: crate::auth::BLOB_TYPE_AC.into(),
+                asa: address.into(),
+                client_id: "velocity-machine-03-controller".into(),
+                code: "test-code".into(),
+                pkce: String::new(),
+            });
+            assert!(matches!(
+                build_connect_request(&asm, IpAddress::UNSPECIFIED, &blob, None),
+                Err(LinkStateError::InvalidOperation(_))
+            ));
+        }
+    }
 
     fn test_visa() -> vsapi_types::Visa {
         vsapi_types::Visa::new(
